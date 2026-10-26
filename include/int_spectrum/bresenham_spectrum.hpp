@@ -96,7 +96,7 @@ public:
     }
 
     // Refine one dominant sinusoid using differential phase between the two
-    // halves of the block.
+    // halves of the block or difference recurrence.
     bool refineSingleTone(const InputBlock& samples,
                           std::uint32_t coarseBin,
                           DifferentialResult& out) const {
@@ -108,61 +108,77 @@ public:
         const auto& lut = sineTable();
         const std::uint64_t coarseFrequencyQ16 =
             static_cast<std::uint64_t>(coarseBin) * 65536ULL;
+
+        // Candidate 1: Frequency from second-difference recurrence
+        std::uint32_t recurrenceFrequencyQ16 = 0;
+        bool recurrenceValid = false;
+        std::int64_t recurrenceOffsetQ16 = 0;
+        if (estimateFrequencyFromDifferences(samples, recurrenceFrequencyQ16)) {
+            recurrenceOffsetQ16 =
+                static_cast<std::int64_t>(recurrenceFrequencyQ16) -
+                static_cast<std::int64_t>(coarseFrequencyQ16);
+            if (recurrenceOffsetQ16 >= -32768LL && recurrenceOffsetQ16 <= 32768LL) {
+                recurrenceValid = true;
+            }
+        }
+
+        // Candidate 2: Half-block differential phase
         ComplexPair halves[2]{};
         correlateHalves(samples, coarseFrequencyQ16, lut, halves);
         const ComplexPair& first = halves[0];
         const ComplexPair& second = halves[1];
 
-        if ((first.re == 0 && first.im == 0) ||
-            (second.re == 0 && second.im == 0)) return false;
+        bool phaseValid = false;
+        std::int64_t phaseOffsetQ16 = 0;
+        std::int64_t angleQ30 = 0;
 
-        // Form dot and cross products using high precision with adaptive scaling
-        std::int64_t dot = 0;
-        std::int64_t cross = 0;
-        if (!computeScaledDotCross(first, second, dot, cross)) return false;
-        if (dot == 0 && cross == 0) return false;
-
-        const std::int64_t angleQ30 = atan2Q30(cross, dot);
-        const std::int64_t phaseOffsetQ16 =
-            divideRounded(angleQ30 * 65536LL, PI_Q30);
-
-        if (phaseOffsetQ16 < -32768LL || phaseOffsetQ16 > 32768LL) return false;
-
-        std::int64_t offsetQ16 = phaseOffsetQ16;
-        std::uint32_t recurrenceFrequencyQ16 = 0;
-        if (estimateFrequencyFromDifferences(samples, recurrenceFrequencyQ16)) {
-            const std::int64_t recurrenceOffset =
-                static_cast<std::int64_t>(recurrenceFrequencyQ16) -
-                static_cast<std::int64_t>(coarseFrequencyQ16);
-            if (recurrenceOffset >= -32768LL && recurrenceOffset <= 32768LL) {
-                // If phase and recurrence offset both agree reasonably or phase is in range
-                const std::int64_t disagreement = recurrenceOffset - phaseOffsetQ16;
-                const std::int64_t absDisagreement =
-                    (disagreement < 0) ? -disagreement : disagreement;
-                if (absDisagreement <= 8192LL) { // 1/8 bin gate
-                    offsetQ16 = recurrenceOffset;
+        if ((first.re != 0 || first.im != 0) && (second.re != 0 || second.im != 0)) {
+            std::int64_t dot = 0, cross = 0;
+            if (computeScaledDotCross(first, second, dot, cross) && (dot != 0 || cross != 0)) {
+                angleQ30 = atan2Q30(cross, dot);
+                phaseOffsetQ16 = divideRounded(angleQ30 * 65536LL, PI_Q30);
+                if (phaseOffsetQ16 >= -32768LL && phaseOffsetQ16 <= 32768LL) {
+                    phaseValid = true;
                 }
             }
         }
 
-        const std::int64_t refinedFrequencyQ16 =
-            static_cast<std::int64_t>(coarseFrequencyQ16) + offsetQ16;
-        const std::int64_t maxFrequencyQ16 =
-            static_cast<std::int64_t>(NYQUIST) * 65536LL;
-        if (refinedFrequencyQ16 <= 0 || refinedFrequencyQ16 >= maxFrequencyQ16)
-            return false;
+        if (!recurrenceValid && !phaseValid) return false;
 
-        std::uint32_t amplitude = 0;
-        if (!fitSinusoidAmplitude(samples,
-                                  static_cast<std::uint64_t>(refinedFrequencyQ16),
-                                  lut, amplitude)) return false;
-        const std::uint64_t strength = static_cast<std::uint64_t>(amplitude) * N;
+        // Evaluate candidate offsets and pick best fit
+        std::int64_t bestOffsetQ16 = 0;
+        std::uint32_t bestAmplitude = 0;
+        bool foundBest = false;
+
+        auto testCandidate = [&](std::int64_t candOffset) {
+            std::int64_t candFreq = static_cast<std::int64_t>(coarseFrequencyQ16) + candOffset;
+            std::int64_t maxFreq = static_cast<std::int64_t>(NYQUIST) * 65536LL;
+            if (candFreq <= 0 || candFreq >= maxFreq) return;
+
+            std::uint32_t amp = 0;
+            if (fitSinusoidAmplitude(samples, static_cast<std::uint64_t>(candFreq), lut, amp)) {
+                if (!foundBest || amp > bestAmplitude) {
+                    bestAmplitude = amp;
+                    bestOffsetQ16 = candOffset;
+                    foundBest = true;
+                }
+            }
+        };
+
+        if (recurrenceValid) testCandidate(recurrenceOffsetQ16);
+        if (phaseValid) testCandidate(phaseOffsetQ16);
+
+        if (!foundBest) return false;
+
+        const std::int64_t refinedFrequencyQ16 =
+            static_cast<std::int64_t>(coarseFrequencyQ16) + bestOffsetQ16;
+        const std::uint64_t strength = static_cast<std::uint64_t>(bestAmplitude) * N;
 
         out.coarse_bin = coarseBin;
-        out.offset_q16 = static_cast<std::int32_t>(offsetQ16);
+        out.offset_q16 = static_cast<std::int32_t>(bestOffsetQ16);
         out.phase_offset_q16 = static_cast<std::int32_t>(phaseOffsetQ16);
         out.frequency_q16 = static_cast<std::uint32_t>(refinedFrequencyQ16);
-        out.peak_amplitude = amplitude;
+        out.peak_amplitude = bestAmplitude;
         out.strength = strength;
         out.phase_difference_q30 = angleQ30;
         return true;
@@ -256,7 +272,6 @@ private:
     static std::int64_t arithmeticShiftRight(std::int64_t value, unsigned shift) {
         if (shift == 0) return value;
         if (value >= 0) return value >> shift;
-        // Floor division arithmetic shift right for negative signed integers
         const std::int64_t divisor = std::int64_t{1} << shift;
         return -((-value + divisor - 1) / divisor);
     }
@@ -379,7 +394,6 @@ private:
         std::int64_t imagAccQ15[2] = {0, 0};
         constexpr std::size_t HALF = N / 2;
 
-        // Estimate and subtract full-block DC mean (full block preserves sinusoid symmetry across halves)
         std::int64_t sumSamples = 0;
         for (std::size_t n = 0; n < N; ++n) {
             sumSamples += samples[n];
@@ -531,33 +545,32 @@ private:
         }
 
         constexpr std::int64_t Q15_SQUARED = Q15_ONE * Q15_ONE;
-        const std::int64_t sumCos = cosSumQ15; // Preserve full Q15 scale
-        const std::int64_t sumSin = sinSumQ15; // Preserve full Q15 scale
+        // Retain sums at Q16 fractional scale
+        const std::int64_t sumCosQ16 = divideRounded(cosSumQ15 * 65536LL, Q15_ONE);
+        const std::int64_t sumSinQ16 = divideRounded(sinSumQ15 * 65536LL, Q15_ONE);
 
-        const std::int64_t rCos =
-            divideRounded(xCosQ15, Q15_ONE) -
-            divideRounded(sampleSum * divideRounded(sumCos, Q15_ONE), static_cast<std::int64_t>(N));
-        const std::int64_t rSin =
-            divideRounded(xSinQ15, Q15_ONE) -
-            divideRounded(sampleSum * divideRounded(sumSin, Q15_ONE), static_cast<std::int64_t>(N));
+        const std::int64_t dcRCos = divideRounded(sampleSum * sumCosQ16, static_cast<std::int64_t>(N) * 65536LL);
+        const std::int64_t dcRSin = divideRounded(sampleSum * sumSinQ16, static_cast<std::int64_t>(N) * 65536LL);
 
-        const std::int64_t gCC =
-            divideRounded(cosCosQ30 * 65536LL, Q15_SQUARED) -
-            divideRounded(divideRounded(sumCos, Q15_ONE) * divideRounded(sumCos, Q15_ONE) * 65536LL, static_cast<std::int64_t>(N));
-        const std::int64_t gSS =
-            divideRounded(sinSinQ30 * 65536LL, Q15_SQUARED) -
-            divideRounded(divideRounded(sumSin, Q15_ONE) * divideRounded(sumSin, Q15_ONE) * 65536LL, static_cast<std::int64_t>(N));
-        const std::int64_t gCS =
-            divideRounded(cosSinQ30 * 65536LL, Q15_SQUARED) -
-            divideRounded(divideRounded(sumCos, Q15_ONE) * divideRounded(sumSin, Q15_ONE) * 65536LL, static_cast<std::int64_t>(N));
+        const std::int64_t rCos = divideRounded(xCosQ15, Q15_ONE) - dcRCos;
+        const std::int64_t rSin = divideRounded(xSinQ15, Q15_ONE) - dcRSin;
+
+        const std::int64_t dcCC = divideRounded(sumCosQ16 * sumCosQ16, static_cast<std::int64_t>(N) * 65536LL);
+        const std::int64_t dcSS = divideRounded(sumSinQ16 * sumSinQ16, static_cast<std::int64_t>(N) * 65536LL);
+        const std::int64_t dcCS = divideRounded(sumCosQ16 * sumSinQ16, static_cast<std::int64_t>(N) * 65536LL);
+
+        const std::int64_t gCC = divideRounded(cosCosQ30 * 65536LL, Q15_SQUARED) - dcCC;
+        const std::int64_t gSS = divideRounded(sinSinQ30 * 65536LL, Q15_SQUARED) - dcSS;
+        const std::int64_t gCS = divideRounded(cosSinQ30 * 65536LL, Q15_SQUARED) - dcCS;
 
         const std::int64_t determinant = gCC * gSS - gCS * gCS;
         const std::int64_t scaledDeterminant = determinant / 65536LL;
 
-        // Condition check: determinant relative to matrix scale
         if (gCC <= 0 || gSS <= 0 || scaledDeterminant <= 0) return false;
+
+        // Overflow-safe conditioning check (determinant < gScale / 100)
         const std::int64_t gScale = gCC * gSS;
-        if (determinant * 100LL < gScale) return false; // reject ill-conditioned system
+        if (determinant < gScale / 100LL) return false;
 
         const std::int64_t numeratorA = rCos * gSS - rSin * gCS;
         const std::int64_t numeratorB = rSin * gCC - rCos * gCS;
