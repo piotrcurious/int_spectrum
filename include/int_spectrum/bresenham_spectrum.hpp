@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
 #include <limits>
 
 namespace int_spectrum {
@@ -20,6 +21,7 @@ class BresenhamSpectrum {
     static_assert(LUT_BITS >= 8 && LUT_BITS <= 12, "LUT_BITS should be in [8, 12]");
 
     static constexpr std::size_t LUT_SIZE = std::size_t{1} << LUT_BITS;
+    static constexpr std::size_t LUT_MASK = LUT_SIZE - 1;
     static constexpr std::uint32_t PHASE_INDEX_SHIFT = 32U - LUT_BITS;
     static constexpr std::int64_t Q15_ONE = 32767;
     static constexpr std::int64_t PI_Q30 = 3373259426LL;
@@ -114,8 +116,10 @@ public:
         if ((first.re == 0 && first.im == 0) ||
             (second.re == 0 && second.im == 0)) return false;
 
-        const std::int64_t dot = first.re * second.re + first.im * second.im;
-        const std::int64_t cross = first.re * second.im - first.im * second.re;
+        // Form dot and cross products using high precision with adaptive scaling
+        std::int64_t dot = 0;
+        std::int64_t cross = 0;
+        if (!computeScaledDotCross(first, second, dot, cross)) return false;
         if (dot == 0 && cross == 0) return false;
 
         const std::int64_t angleQ30 = atan2Q30(cross, dot);
@@ -172,9 +176,22 @@ public:
                 return false;
         }
         if (!analyze(samples, firstBin, lastBin, out)) return false;
-        const auto best = std::max_element(
-            out.begin(), out.end(),
-            [](const Result& a, const Result& b) { return a.strength < b.strength; });
+
+        // Select the strongest detector excluding DC (0) and Nyquist (N/2)
+        constexpr std::uint32_t NYQUIST = static_cast<std::uint32_t>(N / 2);
+        auto best = out.end();
+        std::uint64_t best_strength = 0;
+
+        for (auto it = out.begin(); it != out.end(); ++it) {
+            if (it->bin > 0 && it->bin < NYQUIST) {
+                if (it->strength > best_strength || best == out.end()) {
+                    best_strength = it->strength;
+                    best = it;
+                }
+            }
+        }
+
+        if (best == out.end()) return false;
         return refineSingleTone(samples, best->bin, refined);
     }
 
@@ -196,6 +213,21 @@ private:
             return t;
         }();
         return table;
+    }
+
+    static std::int64_t interpolateSine(std::uint32_t phase,
+                                        bool sine,
+                                        const std::array<std::int16_t, LUT_SIZE>& lut) {
+        const std::uint32_t lookupPhase = sine ? phase : phase + 0x40000000U;
+        const std::size_t idx = lookupPhase >> PHASE_INDEX_SHIFT;
+        const std::uint32_t fractionMask = (std::uint32_t{1} << PHASE_INDEX_SHIFT) - 1U;
+        const std::int64_t fraction = lookupPhase & fractionMask;
+        const std::int64_t first = lut[idx];
+        const std::int64_t next = lut[(idx + 1U) & LUT_MASK];
+        const std::int64_t interpolatedDelta = divideRounded(
+            (next - first) * fraction,
+            static_cast<std::int64_t>(std::uint64_t{1} << PHASE_INDEX_SHIFT));
+        return first + interpolatedDelta;
     }
 
     static std::int64_t divideRounded(std::int64_t x, std::int64_t divisor) {
@@ -226,6 +258,7 @@ private:
         return -((-value + divisor - 1) / divisor);
     }
 
+    // Scale-independent CORDIC vectoring atan2(y, x) scaled to Q30 radians
     static std::int64_t atan2Q30(std::int64_t y, std::int64_t x) {
         static constexpr std::array<std::int64_t, 28> ATAN = {
             843314857LL, 497837829LL, 263043837LL, 133525159LL,
@@ -236,10 +269,34 @@ private:
                  1024LL,       512LL,       256LL,       128LL,
                    64LL,        32LL,        16LL,         8LL
         };
+        if (x == 0 && y == 0) return 0;
         if (x == 0) {
-            if (y > 0) return PI_Q30 / 2;
-            if (y < 0) return -PI_Q30 / 2;
-            return 0;
+            return (y > 0) ? (PI_Q30 / 2) : (-PI_Q30 / 2);
+        }
+
+        // Normalize (x, y) magnitude so max(|x|, |y|) is near 2^30 for full CORDIC precision
+        std::uint64_t absX = static_cast<std::uint64_t>(x < 0 ? -x : x);
+        std::uint64_t absY = static_cast<std::uint64_t>(y < 0 ? -y : y);
+        std::uint64_t maxVal = std::max(absX, absY);
+
+        if (maxVal > 0) {
+            int shift = 0;
+            constexpr std::uint64_t TARGET_MAX = std::uint64_t{1} << 30;
+            if (maxVal < TARGET_MAX) {
+                while (maxVal < (TARGET_MAX >> 1)) {
+                    maxVal <<= 1;
+                    shift++;
+                }
+                x <<= shift;
+                y <<= shift;
+            } else if (maxVal > TARGET_MAX) {
+                while (maxVal > TARGET_MAX) {
+                    maxVal >>= 1;
+                    shift++;
+                }
+                x >>= shift;
+                y >>= shift;
+            }
         }
 
         std::int64_t z = 0;
@@ -286,13 +343,10 @@ private:
         std::uint32_t phase = 0;
         std::int64_t realAccQ15 = 0;
         std::int64_t imagAccQ15 = 0;
-        constexpr std::size_t MASK = LUT_SIZE - 1;
-        constexpr std::size_t QUARTER_TURN = LUT_SIZE / 4;
 
         for (std::size_t n = 0; n < N; ++n) {
-            const std::uint32_t index = phase >> PHASE_INDEX_SHIFT;
-            const std::int32_t sinQ15 = lut[index];
-            const std::int32_t cosQ15 = lut[(index + QUARTER_TURN) & MASK];
+            const std::int32_t sinQ15 = static_cast<std::int32_t>(interpolateSine(phase, true, lut));
+            const std::int32_t cosQ15 = static_cast<std::int32_t>(interpolateSine(phase, false, lut));
             const std::int64_t sample = samples[n];
             realAccQ15 += sample * cosQ15;
             imagAccQ15 -= sample * sinQ15;
@@ -319,16 +373,24 @@ private:
         std::uint32_t phase = 0;
         std::int64_t realAccQ15[2] = {0, 0};
         std::int64_t imagAccQ15[2] = {0, 0};
-        constexpr std::size_t MASK = LUT_SIZE - 1;
-        constexpr std::size_t QUARTER_TURN = LUT_SIZE / 4;
         constexpr std::size_t HALF = N / 2;
+
+        // Estimate and subtract DC separately for each half-block to prevent DC leakage
+        std::int64_t sumSamples[2] = {0, 0};
+        for (std::size_t n = 0; n < N; ++n) {
+            sumSamples[(n < HALF) ? 0 : 1] += samples[n];
+        }
+        const std::int64_t halfN = static_cast<std::int64_t>(HALF);
+        const std::int64_t dcHalf[2] = {
+            divideRounded(sumSamples[0], halfN),
+            divideRounded(sumSamples[1], halfN)
+        };
 
         for (std::size_t n = 0; n < N; ++n) {
             const std::size_t h = (n < HALF) ? 0 : 1;
-            const std::uint32_t index = phase >> PHASE_INDEX_SHIFT;
-            const std::int32_t sinQ15 = lut[index];
-            const std::int32_t cosQ15 = lut[(index + QUARTER_TURN) & MASK];
-            const std::int64_t sample = samples[n];
+            const std::int32_t sinQ15 = static_cast<std::int32_t>(interpolateSine(phase, true, lut));
+            const std::int32_t cosQ15 = static_cast<std::int32_t>(interpolateSine(phase, false, lut));
+            const std::int64_t sample = samples[n] - dcHalf[h];
             realAccQ15[h] += sample * cosQ15;
             imagAccQ15[h] -= sample * sinQ15;
 
@@ -340,10 +402,41 @@ private:
             }
         }
 
-        halves[0] = {divideRounded(realAccQ15[0], Q15_ONE),
-                     divideRounded(imagAccQ15[0], Q15_ONE)};
-        halves[1] = {divideRounded(realAccQ15[1], Q15_ONE),
-                     divideRounded(imagAccQ15[1], Q15_ONE)};
+        // Retain correlation precision (keep in Q15 accumulator scale)
+        halves[0] = {realAccQ15[0], imagAccQ15[0]};
+        halves[1] = {realAccQ15[1], imagAccQ15[1]};
+    }
+
+    static bool computeScaledDotCross(const ComplexPair& first,
+                                     const ComplexPair& second,
+                                     std::int64_t& outDot,
+                                     std::int64_t& outCross) {
+        // Adaptively scale components to prevent 64-bit product overflow
+        std::uint64_t maxMag = 0;
+        auto updateMax = [&maxMag](std::int64_t v) {
+            std::uint64_t absV = static_cast<std::uint64_t>(v < 0 ? -v : v);
+            if (absV > maxMag) maxMag = absV;
+        };
+        updateMax(first.re);
+        updateMax(first.im);
+        updateMax(second.re);
+        updateMax(second.im);
+
+        int shift = 0;
+        constexpr std::uint64_t SAFE_MAX = 1073741823ULL; // 2^30 - 1
+        while (maxMag > SAFE_MAX) {
+            maxMag >>= 1;
+            shift++;
+        }
+
+        std::int64_t f_re = first.re >> shift;
+        std::int64_t f_im = first.im >> shift;
+        std::int64_t s_re = second.re >> shift;
+        std::int64_t s_im = second.im >> shift;
+
+        outDot = f_re * s_re + f_im * s_im;
+        outCross = f_re * s_im - f_im * s_re;
+        return true;
     }
 
     static std::int64_t ratioQ30(std::int64_t num, std::int64_t den) {
@@ -416,13 +509,10 @@ private:
         std::int64_t xCosQ15 = 0, xSinQ15 = 0, sampleSum = 0;
         std::int64_t cosSumQ15 = 0, sinSumQ15 = 0;
         std::int64_t cosCosQ30 = 0, sinSinQ30 = 0, cosSinQ30 = 0;
-        constexpr std::size_t MASK = LUT_SIZE - 1;
-        constexpr std::size_t QUARTER_TURN = LUT_SIZE / 4;
 
         for (std::size_t n = 0; n < N; ++n) {
-            const std::uint32_t index = phase >> PHASE_INDEX_SHIFT;
-            const std::int64_t sinQ15 = lut[index];
-            const std::int64_t cosQ15 = lut[(index + QUARTER_TURN) & MASK];
+            const std::int64_t sinQ15 = interpolateSine(phase, true, lut);
+            const std::int64_t cosQ15 = interpolateSine(phase, false, lut);
             const std::int64_t sample = samples[n];
 
             xCosQ15 += sample * cosQ15;

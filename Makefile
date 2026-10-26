@@ -37,7 +37,7 @@ eval: $(LIB)
 	@python3 $(TEST_DIR)/run_evaluation_suite.py
 
 gui: $(LIB)
-	@./bin/int_spectrum_gui
+	@python3 $(SRC_DIR)/int_spectrum_gui.py
 
 clean:
 	rm -rf $(BUILD_DIR)
