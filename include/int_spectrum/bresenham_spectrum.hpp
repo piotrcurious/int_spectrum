@@ -95,8 +95,7 @@ public:
         return true;
     }
 
-    // Refine one dominant sinusoid using differential phase between the two
-    // halves of the block or difference recurrence.
+    // Refine one dominant sinusoid using long-lag recurrence or half-block differential phase.
     bool refineSingleTone(const InputBlock& samples,
                           std::uint32_t coarseBin,
                           DifferentialResult& out) const {
@@ -109,28 +108,15 @@ public:
         const std::uint64_t coarseFrequencyQ16 =
             static_cast<std::uint64_t>(coarseBin) * 65536ULL;
 
-        // Candidate 1: Frequency from second-difference recurrence
-        std::uint32_t recurrenceFrequencyQ16 = 0;
-        bool recurrenceValid = false;
-        std::int64_t recurrenceOffsetQ16 = 0;
-        if (estimateFrequencyFromDifferences(samples, recurrenceFrequencyQ16)) {
-            recurrenceOffsetQ16 =
-                static_cast<std::int64_t>(recurrenceFrequencyQ16) -
-                static_cast<std::int64_t>(coarseFrequencyQ16);
-            if (recurrenceOffsetQ16 >= -32768LL && recurrenceOffsetQ16 <= 32768LL) {
-                recurrenceValid = true;
-            }
-        }
-
-        // Candidate 2: Half-block differential phase
+        // Candidate 1: Half-block differential phase
         ComplexPair halves[2]{};
         correlateHalves(samples, coarseFrequencyQ16, lut, halves);
         const ComplexPair& first = halves[0];
         const ComplexPair& second = halves[1];
 
-        bool phaseValid = false;
         std::int64_t phaseOffsetQ16 = 0;
         std::int64_t angleQ30 = 0;
+        bool phaseValid = false;
 
         if ((first.re != 0 || first.im != 0) && (second.re != 0 || second.im != 0)) {
             std::int64_t dot = 0, cross = 0;
@@ -143,42 +129,51 @@ public:
             }
         }
 
-        if (!recurrenceValid && !phaseValid) return false;
+        // Candidate 2: Long-lag recurrence estimate
+        std::uint32_t recurrenceFrequencyQ16 = 0;
+        bool recurrenceValid = false;
+        std::int64_t recurrenceOffsetQ16 = 0;
 
-        // Evaluate candidate offsets and pick best fit
-        std::int64_t bestOffsetQ16 = 0;
-        std::uint32_t bestAmplitude = 0;
-        bool foundBest = false;
-
-        auto testCandidate = [&](std::int64_t candOffset) {
-            std::int64_t candFreq = static_cast<std::int64_t>(coarseFrequencyQ16) + candOffset;
-            std::int64_t maxFreq = static_cast<std::int64_t>(NYQUIST) * 65536LL;
-            if (candFreq <= 0 || candFreq >= maxFreq) return;
-
-            std::uint32_t amp = 0;
-            if (fitSinusoidAmplitude(samples, static_cast<std::uint64_t>(candFreq), lut, amp)) {
-                if (!foundBest || amp > bestAmplitude) {
-                    bestAmplitude = amp;
-                    bestOffsetQ16 = candOffset;
-                    foundBest = true;
-                }
+        if (estimateFrequencyFromRecurrence(samples, coarseBin, lut, recurrenceFrequencyQ16)) {
+            recurrenceOffsetQ16 =
+                static_cast<std::int64_t>(recurrenceFrequencyQ16) -
+                static_cast<std::int64_t>(coarseFrequencyQ16);
+            if (recurrenceOffsetQ16 >= -32768LL && recurrenceOffsetQ16 <= 32768LL) {
+                recurrenceValid = true;
             }
-        };
+        }
 
-        if (recurrenceValid) testCandidate(recurrenceOffsetQ16);
-        if (phaseValid) testCandidate(phaseOffsetQ16);
+        std::int64_t offsetQ16 = 0;
+        bool haveOffset = false;
 
-        if (!foundBest) return false;
+        if (recurrenceValid) {
+            offsetQ16 = recurrenceOffsetQ16;
+            haveOffset = true;
+        } else if (phaseValid) {
+            offsetQ16 = phaseOffsetQ16;
+            haveOffset = true;
+        }
+
+        if (!haveOffset) return false;
 
         const std::int64_t refinedFrequencyQ16 =
-            static_cast<std::int64_t>(coarseFrequencyQ16) + bestOffsetQ16;
-        const std::uint64_t strength = static_cast<std::uint64_t>(bestAmplitude) * N;
+            static_cast<std::int64_t>(coarseFrequencyQ16) + offsetQ16;
+        const std::int64_t maxFrequencyQ16 =
+            static_cast<std::int64_t>(NYQUIST) * 65536LL;
+        if (refinedFrequencyQ16 <= 0 || refinedFrequencyQ16 >= maxFrequencyQ16)
+            return false;
+
+        std::uint32_t amplitude = 0;
+        if (!fitSinusoidAmplitude(samples,
+                                  static_cast<std::uint64_t>(refinedFrequencyQ16),
+                                  lut, amplitude)) return false;
+        const std::uint64_t strength = static_cast<std::uint64_t>(amplitude) * N;
 
         out.coarse_bin = coarseBin;
-        out.offset_q16 = static_cast<std::int32_t>(bestOffsetQ16);
+        out.offset_q16 = static_cast<std::int32_t>(offsetQ16);
         out.phase_offset_q16 = static_cast<std::int32_t>(phaseOffsetQ16);
         out.frequency_q16 = static_cast<std::uint32_t>(refinedFrequencyQ16);
-        out.peak_amplitude = bestAmplitude;
+        out.peak_amplitude = amplitude;
         out.strength = strength;
         out.phase_difference_q30 = angleQ30;
         return true;
@@ -195,7 +190,6 @@ public:
         }
         if (!analyze(samples, firstBin, lastBin, out)) return false;
 
-        // Select the strongest detector excluding DC (0) and Nyquist (N/2)
         constexpr std::uint32_t NYQUIST = static_cast<std::uint32_t>(N / 2);
         auto best = out.end();
         std::uint64_t best_strength = 0;
@@ -276,7 +270,6 @@ private:
         return -((-value + divisor - 1) / divisor);
     }
 
-    // Scale-independent CORDIC vectoring atan2(y, x) scaled to Q30 radians
     static std::int64_t atan2Q30(std::int64_t y, std::int64_t x) {
         static constexpr std::array<std::int64_t, 28> ATAN = {
             843314857LL, 497837829LL, 263043837LL, 133525159LL,
@@ -292,7 +285,6 @@ private:
             return (y > 0) ? (PI_Q30 / 2) : (-PI_Q30 / 2);
         }
 
-        // Normalize (x, y) magnitude so max(|x|, |y|) is near 2^30 for full CORDIC precision
         std::uint64_t absX = static_cast<std::uint64_t>(x < 0 ? -x : x);
         std::uint64_t absY = static_cast<std::uint64_t>(y < 0 ? -y : y);
         std::uint64_t maxVal = std::max(absX, absY);
@@ -435,7 +427,7 @@ private:
         updateMax(second.im);
 
         int shift = 0;
-        constexpr std::uint64_t SAFE_MAX = 1073741823ULL; // 2^30 - 1
+        constexpr std::uint64_t SAFE_MAX = 1073741823ULL;
         while (maxMag > SAFE_MAX) {
             maxMag >>= 1;
             shift++;
@@ -475,37 +467,180 @@ private:
         return negative ? -signedQuotient : signedQuotient;
     }
 
-    static bool estimateFrequencyFromDifferences(
-        const InputBlock& samples, std::uint32_t& frequencyQ16) {
-        std::int64_t numerator = 0;
-        std::int64_t energy = 0;
-        for (std::size_t n = 1; n + 2 < N; ++n) {
-            const std::int64_t previous =
-                static_cast<std::int64_t>(samples[n]) - samples[n - 1];
-            const std::int64_t current =
-                static_cast<std::int64_t>(samples[n + 1]) - samples[n];
-            const std::int64_t next =
-                static_cast<std::int64_t>(samples[n + 2]) - samples[n + 1];
-            numerator += current * (previous + next);
-            energy += current * current;
-        }
-        if (energy == 0) return false;
+    static std::int64_t recurrenceSample(
+        const InputBlock& samples,
+        std::size_t n,
+        bool reflectNyquist) {
 
-        const std::int64_t cosineQ30 = ratioQ30(numerator, 2 * energy);
+        if (!reflectNyquist) {
+            return samples[n];
+        }
+
+        const std::int64_t difference =
+            static_cast<std::int64_t>(samples[n]) - samples[n - 1];
+
+        return (n & 1U) ? -difference : difference;
+    }
+
+    static bool estimateFrequencyFromRecurrence(
+        const InputBlock& samples,
+        std::uint32_t coarseBin,
+        const std::array<std::int16_t, LUT_SIZE>& lut,
+        std::uint32_t& frequencyQ16) {
+
+        constexpr std::uint32_t NYQUIST =
+            static_cast<std::uint32_t>(N / 2);
+
+        if (coarseBin == 0 || coarseBin >= NYQUIST) {
+            return false;
+        }
+
+        const bool reflectNyquist = coarseBin > N / 4;
+        const std::uint32_t targetBin = reflectNyquist
+            ? NYQUIST - coarseBin
+            : coarseBin;
+
+        std::size_t lag =
+            (N + 6U * targetBin) / (12U * targetBin);
+
+        if (lag == 0) {
+            lag = 1;
+        }
+
+        const std::size_t maxJ = reflectNyquist
+            ? ((N >= 5) ? (N - 5) / 2 : 0)
+            : ((N >= 4) ? (N - 4) / 2 : 0);
+
+        const std::size_t firstJ = reflectNyquist ? 3 : 2;
+
+        if (maxJ < firstJ) {
+            return false;
+        }
+
+        std::size_t J = 0;
+
+        if (lag >= 2 && lag + 2 <= maxJ) {
+            J = lag + 2;
+        } else {
+            lag = 1;
+            const std::size_t lastJ = std::min<std::size_t>(8, maxJ);
+            std::uint64_t bestMagnitude = 0;
+
+            for (std::size_t j = firstJ; j <= lastJ; ++j) {
+                const std::uint64_t phaseNumerator =
+                    (static_cast<std::uint64_t>(targetBin) * j) << 32;
+
+                const std::uint32_t phase =
+                    static_cast<std::uint32_t>(phaseNumerator / N);
+
+                const std::int64_t cosine =
+                    interpolateSine(phase, false, lut);
+
+                const std::uint64_t magnitude =
+                    static_cast<std::uint64_t>(
+                        cosine < 0 ? -cosine : cosine);
+
+                if (magnitude > bestMagnitude) {
+                    bestMagnitude = magnitude;
+                    J = j;
+                }
+            }
+
+            if (J == 0) {
+                return false;
+            }
+        }
+
+        const std::size_t start = reflectNyquist ? J + 1 : J;
+        const std::size_t end = N - J;
+
+        if (end <= start || end - start < 4) {
+            return false;
+        }
+
+        std::int64_t sumX = 0;
+        std::int64_t sumY = 0;
+        std::int64_t sumZ = 0;
+        std::int64_t sumXZ = 0;
+        std::int64_t sumYZ = 0;
+
+        for (std::size_t n = start; n < end; ++n) {
+            const std::int64_t x =
+                recurrenceSample(samples, n, reflectNyquist);
+
+            const std::int64_t xm =
+                recurrenceSample(samples, n - lag, reflectNyquist);
+            const std::int64_t xp =
+                recurrenceSample(samples, n + lag, reflectNyquist);
+
+            const std::int64_t zm =
+                recurrenceSample(samples, n - J, reflectNyquist);
+            const std::int64_t zp =
+                recurrenceSample(samples, n + J, reflectNyquist);
+
+            std::int64_t y = xm + xp;
+            std::int64_t z = zm + zp;
+
+            if (reflectNyquist) {
+                y = divideRounded(y, 2);
+                z = divideRounded(z, 2);
+            }
+
+            sumX += x;
+            sumY += y;
+            sumZ += z;
+            sumXZ += x * z;
+            sumYZ += y * z;
+        }
+
+        const std::int64_t count = static_cast<std::int64_t>(end - start);
+
+        const std::int64_t covarianceXZ = count * sumXZ - sumX * sumZ;
+        const std::int64_t covarianceYZ = count * sumYZ - sumY * sumZ;
+
+        if (covarianceXZ == 0) {
+            return false;
+        }
+
+        std::int64_t cosineNumerator = covarianceYZ;
+        std::int64_t cosineDenominator = reflectNyquist ? covarianceXZ : 2 * covarianceXZ;
+
+        if (cosineDenominator < 0) {
+            cosineDenominator = -cosineDenominator;
+            cosineNumerator = -cosineNumerator;
+        }
+
+        if (cosineDenominator <= 0) {
+            return false;
+        }
+
+        const std::int64_t cosineQ30 = ratioQ30(cosineNumerator, cosineDenominator);
         constexpr std::int64_t ONE_Q30 = std::int64_t{1} << 30;
-        const std::int64_t boundedCosine =
-            std::max(-ONE_Q30, std::min(ONE_Q30, cosineQ30));
+        const std::int64_t boundedCosine = std::max(-ONE_Q30, std::min(ONE_Q30, cosineQ30));
+
         const std::uint64_t sineSquared = static_cast<std::uint64_t>(
             ONE_Q30 * ONE_Q30 - boundedCosine * boundedCosine);
+
         const std::int64_t sineQ30 = static_cast<std::int64_t>(integerSqrt(sineSquared));
-        const std::int64_t omegaQ30 = atan2Q30(sineQ30, boundedCosine);
-        const std::int64_t binQ16 = divideRounded(
-            omegaQ30 * static_cast<std::int64_t>(N) * 65536LL,
+
+        std::int64_t angleQ30 = atan2Q30(sineQ30, boundedCosine);
+        angleQ30 = divideRounded(angleQ30, static_cast<std::int64_t>(lag));
+
+        const std::int64_t targetFrequencyQ16 = divideRounded(
+            angleQ30 * static_cast<std::int64_t>(N) * 65536LL,
             2 * PI_Q30);
-        const std::int64_t maxBinQ16 =
-            static_cast<std::int64_t>(N / 2) * 65536LL;
-        if (binQ16 <= 0 || binQ16 >= maxBinQ16) return false;
-        frequencyQ16 = static_cast<std::uint32_t>(binQ16);
+
+        const std::int64_t nyquistQ16 = static_cast<std::int64_t>(NYQUIST) * 65536LL;
+
+        const std::int64_t absoluteFrequencyQ16 = reflectNyquist
+            ? nyquistQ16 - targetFrequencyQ16
+            : targetFrequencyQ16;
+
+        if (absoluteFrequencyQ16 <= 0 || absoluteFrequencyQ16 >= nyquistQ16) {
+            return false;
+        }
+
+        frequencyQ16 = static_cast<std::uint32_t>(absoluteFrequencyQ16);
         return true;
     }
 
@@ -545,7 +680,6 @@ private:
         }
 
         constexpr std::int64_t Q15_SQUARED = Q15_ONE * Q15_ONE;
-        // Retain sums at Q16 fractional scale
         const std::int64_t sumCosQ16 = divideRounded(cosSumQ15 * 65536LL, Q15_ONE);
         const std::int64_t sumSinQ16 = divideRounded(sinSumQ15 * 65536LL, Q15_ONE);
 
@@ -568,7 +702,6 @@ private:
 
         if (gCC <= 0 || gSS <= 0 || scaledDeterminant <= 0) return false;
 
-        // Overflow-safe conditioning check (determinant < gScale / 100)
         const std::int64_t gScale = gCC * gSS;
         if (determinant < gScale / 100LL) return false;
 
@@ -577,7 +710,6 @@ private:
         const std::int64_t a = divideRounded(numeratorA, scaledDeterminant);
         const std::int64_t b = divideRounded(numeratorB, scaledDeterminant);
 
-        // Checked multiplication and squaring
         constexpr std::int64_t MAX_I32 = 2147483647LL;
         const std::uint64_t absA = static_cast<std::uint64_t>(a < 0 ? -a : a);
         const std::uint64_t absB = static_cast<std::uint64_t>(b < 0 ? -b : b);
