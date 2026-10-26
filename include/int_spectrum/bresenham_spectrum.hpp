@@ -134,12 +134,14 @@ public:
             const std::int64_t recurrenceOffset =
                 static_cast<std::int64_t>(recurrenceFrequencyQ16) -
                 static_cast<std::int64_t>(coarseFrequencyQ16);
-            const std::int64_t disagreement = recurrenceOffset - phaseOffsetQ16;
-            const std::int64_t absDisagreement =
-                (disagreement < 0) ? -disagreement : disagreement;
-            if (recurrenceOffset >= -32768LL && recurrenceOffset <= 32768LL &&
-                absDisagreement <= 2048LL) {
-                offsetQ16 = recurrenceOffset;
+            if (recurrenceOffset >= -32768LL && recurrenceOffset <= 32768LL) {
+                // If phase and recurrence offset both agree reasonably or phase is in range
+                const std::int64_t disagreement = recurrenceOffset - phaseOffsetQ16;
+                const std::int64_t absDisagreement =
+                    (disagreement < 0) ? -disagreement : disagreement;
+                if (absDisagreement <= 8192LL) { // 1/8 bin gate
+                    offsetQ16 = recurrenceOffset;
+                }
             }
         }
 
@@ -251,10 +253,11 @@ private:
         return root;
     }
 
-    static std::int64_t shiftRightFloor(std::int64_t value, unsigned shift) {
+    static std::int64_t arithmeticShiftRight(std::int64_t value, unsigned shift) {
         if (shift == 0) return value;
+        if (value >= 0) return value >> shift;
+        // Floor division arithmetic shift right for negative signed integers
         const std::int64_t divisor = std::int64_t{1} << shift;
-        if (value >= 0) return value / divisor;
         return -((-value + divisor - 1) / divisor);
     }
 
@@ -287,15 +290,16 @@ private:
                     maxVal <<= 1;
                     shift++;
                 }
-                x <<= shift;
-                y <<= shift;
+                const std::int64_t scale = std::int64_t{1} << shift;
+                x *= scale;
+                y *= scale;
             } else if (maxVal > TARGET_MAX) {
                 while (maxVal > TARGET_MAX) {
                     maxVal >>= 1;
                     shift++;
                 }
-                x >>= shift;
-                y >>= shift;
+                x = arithmeticShiftRight(x, shift);
+                y = arithmeticShiftRight(y, shift);
             }
         }
 
@@ -311,12 +315,12 @@ private:
             const std::int64_t oldX = x;
             const std::int64_t oldY = y;
             if (oldY > 0) {
-                x = oldX + shiftRightFloor(oldY, i);
-                y = oldY - shiftRightFloor(oldX, i);
+                x = oldX + arithmeticShiftRight(oldY, i);
+                y = oldY - arithmeticShiftRight(oldX, i);
                 z += ATAN[i];
             } else if (oldY < 0) {
-                x = oldX - shiftRightFloor(oldY, i);
-                y = oldY + shiftRightFloor(oldX, i);
+                x = oldX - arithmeticShiftRight(oldY, i);
+                y = oldY + arithmeticShiftRight(oldX, i);
                 z -= ATAN[i];
             }
         }
@@ -375,22 +379,18 @@ private:
         std::int64_t imagAccQ15[2] = {0, 0};
         constexpr std::size_t HALF = N / 2;
 
-        // Estimate and subtract DC separately for each half-block to prevent DC leakage
-        std::int64_t sumSamples[2] = {0, 0};
+        // Estimate and subtract full-block DC mean (full block preserves sinusoid symmetry across halves)
+        std::int64_t sumSamples = 0;
         for (std::size_t n = 0; n < N; ++n) {
-            sumSamples[(n < HALF) ? 0 : 1] += samples[n];
+            sumSamples += samples[n];
         }
-        const std::int64_t halfN = static_cast<std::int64_t>(HALF);
-        const std::int64_t dcHalf[2] = {
-            divideRounded(sumSamples[0], halfN),
-            divideRounded(sumSamples[1], halfN)
-        };
+        const std::int64_t dcMean = divideRounded(sumSamples, static_cast<std::int64_t>(N));
 
         for (std::size_t n = 0; n < N; ++n) {
             const std::size_t h = (n < HALF) ? 0 : 1;
             const std::int32_t sinQ15 = static_cast<std::int32_t>(interpolateSine(phase, true, lut));
             const std::int32_t cosQ15 = static_cast<std::int32_t>(interpolateSine(phase, false, lut));
-            const std::int64_t sample = samples[n] - dcHalf[h];
+            const std::int64_t sample = samples[n] - dcMean;
             realAccQ15[h] += sample * cosQ15;
             imagAccQ15[h] -= sample * sinQ15;
 
@@ -402,7 +402,6 @@ private:
             }
         }
 
-        // Retain correlation precision (keep in Q15 accumulator scale)
         halves[0] = {realAccQ15[0], imagAccQ15[0]};
         halves[1] = {realAccQ15[1], imagAccQ15[1]};
     }
@@ -411,7 +410,6 @@ private:
                                      const ComplexPair& second,
                                      std::int64_t& outDot,
                                      std::int64_t& outCross) {
-        // Adaptively scale components to prevent 64-bit product overflow
         std::uint64_t maxMag = 0;
         auto updateMax = [&maxMag](std::int64_t v) {
             std::uint64_t absV = static_cast<std::uint64_t>(v < 0 ? -v : v);
@@ -429,10 +427,10 @@ private:
             shift++;
         }
 
-        std::int64_t f_re = first.re >> shift;
-        std::int64_t f_im = first.im >> shift;
-        std::int64_t s_re = second.re >> shift;
-        std::int64_t s_im = second.im >> shift;
+        std::int64_t f_re = arithmeticShiftRight(first.re, shift);
+        std::int64_t f_im = arithmeticShiftRight(first.im, shift);
+        std::int64_t s_re = arithmeticShiftRight(second.re, shift);
+        std::int64_t s_im = arithmeticShiftRight(second.im, shift);
 
         outDot = f_re * s_re + f_im * s_im;
         outCross = f_re * s_im - f_im * s_re;
@@ -533,36 +531,49 @@ private:
         }
 
         constexpr std::int64_t Q15_SQUARED = Q15_ONE * Q15_ONE;
-        const std::int64_t sumCos = divideRounded(cosSumQ15, Q15_ONE);
-        const std::int64_t sumSin = divideRounded(sinSumQ15, Q15_ONE);
+        const std::int64_t sumCos = cosSumQ15; // Preserve full Q15 scale
+        const std::int64_t sumSin = sinSumQ15; // Preserve full Q15 scale
 
         const std::int64_t rCos =
             divideRounded(xCosQ15, Q15_ONE) -
-            divideRounded(sampleSum * sumCos, static_cast<std::int64_t>(N));
+            divideRounded(sampleSum * divideRounded(sumCos, Q15_ONE), static_cast<std::int64_t>(N));
         const std::int64_t rSin =
             divideRounded(xSinQ15, Q15_ONE) -
-            divideRounded(sampleSum * sumSin, static_cast<std::int64_t>(N));
+            divideRounded(sampleSum * divideRounded(sumSin, Q15_ONE), static_cast<std::int64_t>(N));
+
         const std::int64_t gCC =
             divideRounded(cosCosQ30 * 65536LL, Q15_SQUARED) -
-            divideRounded(sumCos * sumCos * 65536LL, static_cast<std::int64_t>(N));
+            divideRounded(divideRounded(sumCos, Q15_ONE) * divideRounded(sumCos, Q15_ONE) * 65536LL, static_cast<std::int64_t>(N));
         const std::int64_t gSS =
             divideRounded(sinSinQ30 * 65536LL, Q15_SQUARED) -
-            divideRounded(sumSin * sumSin * 65536LL, static_cast<std::int64_t>(N));
+            divideRounded(divideRounded(sumSin, Q15_ONE) * divideRounded(sumSin, Q15_ONE) * 65536LL, static_cast<std::int64_t>(N));
         const std::int64_t gCS =
             divideRounded(cosSinQ30 * 65536LL, Q15_SQUARED) -
-            divideRounded(sumCos * sumSin * 65536LL, static_cast<std::int64_t>(N));
+            divideRounded(divideRounded(sumCos, Q15_ONE) * divideRounded(sumSin, Q15_ONE) * 65536LL, static_cast<std::int64_t>(N));
+
         const std::int64_t determinant = gCC * gSS - gCS * gCS;
         const std::int64_t scaledDeterminant = determinant / 65536LL;
-        if (scaledDeterminant <= 0) return false;
+
+        // Condition check: determinant relative to matrix scale
+        if (gCC <= 0 || gSS <= 0 || scaledDeterminant <= 0) return false;
+        const std::int64_t gScale = gCC * gSS;
+        if (determinant * 100LL < gScale) return false; // reject ill-conditioned system
 
         const std::int64_t numeratorA = rCos * gSS - rSin * gCS;
         const std::int64_t numeratorB = rSin * gCC - rCos * gCS;
         const std::int64_t a = divideRounded(numeratorA, scaledDeterminant);
         const std::int64_t b = divideRounded(numeratorB, scaledDeterminant);
-        const std::uint64_t coefficientMagnitudeSquared =
-            static_cast<std::uint64_t>(a * a) +
-            static_cast<std::uint64_t>(b * b);
+
+        // Checked multiplication and squaring
+        constexpr std::int64_t MAX_I32 = 2147483647LL;
+        const std::uint64_t absA = static_cast<std::uint64_t>(a < 0 ? -a : a);
+        const std::uint64_t absB = static_cast<std::uint64_t>(b < 0 ? -b : b);
+        if (absA > static_cast<std::uint64_t>(MAX_I32) || absB > static_cast<std::uint64_t>(MAX_I32)) return false;
+
+        const std::uint64_t coefficientMagnitudeSquared = absA * absA + absB * absB;
         const std::uint64_t coefficientMagnitude = integerSqrt(coefficientMagnitudeSquared);
+        if (coefficientMagnitude > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) return false;
+
         amplitude = static_cast<std::uint32_t>(coefficientMagnitude);
         return true;
     }
