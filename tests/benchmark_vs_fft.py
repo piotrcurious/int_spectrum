@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import ctypes
+import subprocess
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'tests')))
@@ -120,7 +121,19 @@ def run_benchmarks():
         print(f"{target_f:<18.2f} | {fft_detected_f:<15.2f} | {fft_err:<15.4f} | {int_err:.4f}")
 
     # ----------------------------------------------------
-    # Benchmark 3: Structural & Algorithmic Comparison
+    # Benchmark 3: Native CPU Cycle Counts (RDTSC / Cycles)
+    # ----------------------------------------------------
+    print("\n[Benchmark 3] Native C++ CPU Clock Cycles per Block & Sample")
+    print("-" * 78)
+    bench_bin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bin', 'benchmark_cpu_cycles')
+    if os.path.exists(bench_bin):
+        res = subprocess.run([bench_bin], capture_output=True, text=True)
+        print(res.stdout)
+    else:
+        print("Compiled C++ cycle benchmark binary not found. Build with 'make benchmark'.")
+
+    # ----------------------------------------------------
+    # Benchmark 4: Structural & Algorithmic Comparison
     # ----------------------------------------------------
     print("\n[Benchmark 3] Architectural & Memory Feature Comparison")
     print("-" * 78)

@@ -9,10 +9,11 @@ TEST_DIR = tests
 LIB = $(BUILD_DIR)/libint_spectrum.so
 DEMO_BRESENHAM = $(BUILD_DIR)/bresenham_demo
 TEST_CPP = $(BUILD_DIR)/test_int_spectrum
+BENCHMARK_CPU_CPP = $(BUILD_DIR)/benchmark_cpu_cycles
 
 .PHONY: all clean test gui eval benchmark
 
-all: $(LIB) $(DEMO_BRESENHAM) $(TEST_CPP)
+all: $(LIB) $(DEMO_BRESENHAM) $(TEST_CPP) $(BENCHMARK_CPU_CPP)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -26,6 +27,9 @@ $(DEMO_BRESENHAM): bresenham_spectrum.cpp | $(BUILD_DIR)
 $(TEST_CPP): $(TEST_DIR)/test_int_spectrum.cpp $(LIB) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $< -L$(BUILD_DIR) -lint_spectrum -Wl,-rpath,$(BUILD_DIR) -o $@
 
+$(BENCHMARK_CPU_CPP): $(TEST_DIR)/benchmark_cpu_cycles.cpp $(LIB) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $< -L$(BUILD_DIR) -lint_spectrum -Wl,-rpath,$(BUILD_DIR) -o $@
+
 test: $(LIB) $(TEST_CPP)
 	@echo "--- Running C++ Unit Tests ---"
 	@./$(TEST_CPP)
@@ -36,7 +40,9 @@ eval: $(LIB)
 	@echo "--- Running Evaluation Suite ---"
 	@python3 $(TEST_DIR)/run_evaluation_suite.py
 
-benchmark: $(LIB)
+benchmark: $(LIB) $(BENCHMARK_CPU_CPP)
+	@echo "--- Running Native C++ CPU Cycles Benchmark ---"
+	@./$(BENCHMARK_CPU_CPP)
 	@echo "--- Running FFT Comparison Benchmark ---"
 	@python3 $(TEST_DIR)/benchmark_vs_fft.py
 
