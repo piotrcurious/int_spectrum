@@ -255,10 +255,16 @@ public:
         return true;
     }
 
+    static std::uint64_t magnitude64(std::int64_t value) {
+        return value < 0
+            ? static_cast<std::uint64_t>(-(value + 1)) + 1ULL
+            : static_cast<std::uint64_t>(value);
+    }
+
     static std::uint64_t residualRmsQ8(const ResidualBlock& residual) {
         std::uint64_t energy = 0;
         for (const std::int64_t x : residual) {
-            const std::uint64_t mag = static_cast<std::uint64_t>(x < 0 ? -x : x);
+            const std::uint64_t mag = magnitude64(x);
             if (mag != 0 && mag > (std::numeric_limits<std::uint64_t>::max() - energy) / mag) {
                 energy = std::numeric_limits<std::uint64_t>::max();
                 break;
@@ -296,14 +302,18 @@ private:
                      const WienerOptions& options,
                      WienerReport& report) const {
         report = WienerReport{};
+        constexpr std::uint64_t MAX_SIGMA_Q8 = 32768ULL * 256ULL; // 8,388,608 Q8 units
+
         if (toneCount > MAX_TONES || options.noisePowerScaleQ8 == 0 ||
             options.noisePowerScaleQ8 > 4096 ||
             options.minimumGainQ15 > 32768 ||
             options.suppressBelowGainQ15 > 32768 ||
-            options.noiseSigmaQ8 > 32768U * 256U) return false;
+            options.noiseSigmaQ8 > MAX_SIGMA_Q8) return false;
 
         const std::uint64_t estimatedSigmaQ8 =
             options.noiseSigmaQ8 == 0 ? residualRmsQ8(residual) : options.noiseSigmaQ8;
+
+        if (estimatedSigmaQ8 > MAX_SIGMA_Q8) return false;
         report.noiseSigmaQ8 = static_cast<std::uint32_t>(estimatedSigmaQ8);
 
         const std::uint64_t sigmaSquared = estimatedSigmaQ8 * estimatedSigmaQ8;
@@ -544,6 +554,7 @@ private:
     static std::int64_t divideSigned(std::int64_t x, std::int64_t d) {
         if (d == 0) return 0;
         if (d < 0) {
+            if (d == std::numeric_limits<std::int64_t>::min()) return 0;
             x = -x;
             d = -d;
         }
@@ -639,14 +650,13 @@ private:
         const std::int64_t determinant = gCC * gSS - gCS * gCS;
         if (determinant <= 16 || gCC <= 0 || gSS <= 0) return {};
 
-        // Relative conditioning check
         const std::int64_t gScale = gCC * gSS;
         if (gScale <= 0 || determinant < gScale / 100LL) return {};
 
         const std::int64_t a = divideRounded(xC * gSS - xS * gCS, determinant);
         const std::int64_t b = divideRounded(xS * gCC - xC * gCS, determinant);
-        const std::uint64_t aa = static_cast<std::uint64_t>(a < 0 ? -a : a);
-        const std::uint64_t bb = static_cast<std::uint64_t>(b < 0 ? -b : b);
+        const std::uint64_t aa = magnitude64(a);
+        const std::uint64_t bb = magnitude64(b);
         if (aa > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) ||
             bb > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) return {};
         const std::uint64_t amplitude = integerSqrt(aa * aa + bb * bb);
@@ -661,8 +671,7 @@ private:
             const std::int64_t s = basisValue(phase, true, lut) - meanS;
             const std::int64_t modelQ8 = divideRounded(a * c + b * s, Q15_ONE);
             const std::int64_t error = residual[n] - modelQ8;
-            const std::uint64_t magnitude = static_cast<std::uint64_t>(
-                error < 0 ? -error : error);
+            const std::uint64_t magnitude = magnitude64(error);
             if (magnitude != 0 && magnitude >
                 (std::numeric_limits<std::uint64_t>::max() - errorEnergy) / magnitude) {
                 errorEnergy = std::numeric_limits<std::uint64_t>::max();
@@ -819,7 +828,6 @@ private:
             const std::int64_t pivot = matrix[p][p];
             for (std::size_t r = p + 1; r < dimensions; ++r) {
                 if (matrix[r][p] == 0) continue;
-                // Use divideSigned to safely handle negative pivot values
                 const std::int64_t factorQ30 = divideSigned(
                     matrix[r][p] * ONE_Q30, pivot);
                 for (std::size_t c = p + 1; c < dimensions; ++c) {
@@ -852,8 +860,8 @@ private:
         for (std::size_t i = 0; i < toneCount; ++i) {
             const std::int64_t a = solution[2 * i];
             const std::int64_t b = solution[2 * i + 1];
-            const std::uint64_t aa = static_cast<std::uint64_t>(a < 0 ? -a : a);
-            const std::uint64_t bb = static_cast<std::uint64_t>(b < 0 ? -b : b);
+            const std::uint64_t aa = magnitude64(a);
+            const std::uint64_t bb = magnitude64(b);
             const std::uint64_t ampQ8 = integerSqrt(aa * aa + bb * bb);
             updated[i].cosineQ8 = clampI32(a);
             updated[i].sineQ8 = clampI32(b);
@@ -875,7 +883,7 @@ private:
     static std::uint64_t residualEnergy(const ResidualBlock& residual) {
         std::uint64_t energy = 0;
         for (const std::int64_t value : residual) {
-            const std::uint64_t magnitude = static_cast<std::uint64_t>(value < 0 ? -value : value);
+            const std::uint64_t magnitude = magnitude64(value);
             if (magnitude != 0 && magnitude >
                 (std::numeric_limits<std::uint64_t>::max() - energy) / magnitude)
                 return std::numeric_limits<std::uint64_t>::max();
