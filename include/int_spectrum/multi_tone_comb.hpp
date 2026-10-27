@@ -259,6 +259,10 @@ public:
         std::uint64_t energy = 0;
         for (const std::int64_t x : residual) {
             const std::uint64_t mag = static_cast<std::uint64_t>(x < 0 ? -x : x);
+            if (mag != 0 && mag > (std::numeric_limits<std::uint64_t>::max() - energy) / mag) {
+                energy = std::numeric_limits<std::uint64_t>::max();
+                break;
+            }
             energy += mag * mag;
         }
         return integerSqrt(energy / N);
@@ -473,8 +477,11 @@ private:
             ToneList pruned{};
             std::size_t kept = 0;
             for (std::size_t i = 0; i < toneCount; ++i) {
-                if (tones[i].peakAmplitude >= minimumAmplitude)
-                    pruned[kept++] = tones[i];
+                if (tones[i].peakAmplitude >= minimumAmplitude) {
+                    if (kept < MAX_TONES) {
+                        pruned[kept++] = tones[i];
+                    }
+                }
             }
             if (kept < toneCount) {
                 if (kept == 0) {
@@ -532,6 +539,16 @@ private:
             return out;
         }();
         return table;
+    }
+
+    static std::int64_t divideSigned(std::int64_t x, std::int64_t d) {
+        if (d == 0) return 0;
+        if (d < 0) {
+            x = -x;
+            d = -d;
+        }
+        if (x >= 0) return (x + d / 2) / d;
+        return -((-x + d / 2) / d);
     }
 
     static std::int64_t divideRounded(std::int64_t x, std::int64_t d) {
@@ -621,6 +638,10 @@ private:
 
         const std::int64_t determinant = gCC * gSS - gCS * gCS;
         if (determinant <= 16 || gCC <= 0 || gSS <= 0) return {};
+
+        // Relative conditioning check
+        const std::int64_t gScale = gCC * gSS;
+        if (gScale <= 0 || determinant < gScale / 100LL) return {};
 
         const std::int64_t a = divideRounded(xC * gSS - xS * gCS, determinant);
         const std::int64_t b = divideRounded(xS * gCC - xC * gCS, determinant);
@@ -798,13 +819,14 @@ private:
             const std::int64_t pivot = matrix[p][p];
             for (std::size_t r = p + 1; r < dimensions; ++r) {
                 if (matrix[r][p] == 0) continue;
-                const std::int64_t factorQ30 = divideRounded(
+                // Use divideSigned to safely handle negative pivot values
+                const std::int64_t factorQ30 = divideSigned(
                     matrix[r][p] * ONE_Q30, pivot);
                 for (std::size_t c = p + 1; c < dimensions; ++c) {
-                    matrix[r][c] -= divideRounded(
+                    matrix[r][c] -= divideSigned(
                         factorQ30 * matrix[p][c], ONE_Q30);
                 }
-                rhs[r] -= divideRounded(factorQ30 * rhs[p], ONE_Q30);
+                rhs[r] -= divideSigned(factorQ30 * rhs[p], ONE_Q30);
                 matrix[r][p] = 0;
             }
         }
@@ -813,7 +835,7 @@ private:
             const std::size_t i = reverse - 1;
             std::int64_t value = rhs[i];
             for (std::size_t j = i + 1; j < dimensions; ++j) {
-                value -= divideRounded(matrix[i][j] * solution[j], ONE_Q30);
+                value -= divideSigned(matrix[i][j] * solution[j], ONE_Q30);
             }
             const std::int64_t pivot = matrix[i][i];
             const std::int64_t pivotMagnitude = (pivot < 0) ? -pivot : pivot;
@@ -821,7 +843,7 @@ private:
                 value > std::numeric_limits<std::int64_t>::max() / ONE_Q30 ||
                 value < std::numeric_limits<std::int64_t>::min() / ONE_Q30)
                 return false;
-            solution[i] = divideRounded(value * ONE_Q30, pivot);
+            solution[i] = divideSigned(value * ONE_Q30, pivot);
             if (solution[i] > std::numeric_limits<std::int32_t>::max() ||
                 solution[i] < std::numeric_limits<std::int32_t>::min()) return false;
         }
