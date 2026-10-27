@@ -11,7 +11,7 @@ DSP frequency discriminator and multi-tone spectral analyzer using crude integer
 The repository includes:
 - **Core Library (`include/int_spectrum/`)**: Templated C++17 fixed-point DSP headers (`bresenham_spectrum.hpp`, `multi_tone_comb.hpp`) and C API header (`c_api.h`).
 - **Shared Library (`bin/libint_spectrum.so`)**: C-compatible shared library compiled for C, C++, and Python integrations.
-- **Evaluation & Test Suite (`tests/`)**: C++ unit tests, Python ctypes unit tests, automated DSP benchmark suite, and documentation graph generator.
+- **Evaluation & Test Suite (`tests/`)**: C++ unit tests, Python ctypes unit tests, automated DSP benchmark suite, FFT comparison benchmark, and documentation graph generator.
 - **Linux GUI Application (`src/int_spectrum_gui.py` / `bin/int_spectrum_gui`)**: Full desktop GUI application for real-time evaluation, parameter tuning, synthetic signal generation, WAV audio file analysis, and live microphone streaming.
 
 ---
@@ -34,9 +34,10 @@ int_spectrum/
 │   ├── test_int_spectrum.cpp    # C++ unit tests runner
 │   ├── test_int_spectrum.py     # Python ctypes unit tests
 │   ├── run_evaluation_suite.py  # DSP benchmark suite runner
+│   ├── benchmark_vs_fft.py     # FFT comparison benchmark runner
 │   └── generate_doc_graphs.py   # Test chart & graph generator for docs
 ├── docs/images/                 # Documentation figures and test plots
-├── Makefile                     # Build system for shared library, tests, and GUI
+├── Makefile                     # Build system for shared library, tests, GUI, and benchmarks
 ├── README.md                    # Project documentation
 └── [legacy sketches]            # Original standalone prototype C++ files
 ```
@@ -55,11 +56,41 @@ int_spectrum/
 
 ---
 
-## Performance & Accuracy
+## Performance & Comparison Against Standard FFT
+
+![FFT Comparison](docs/images/fft_vs_intspectrum.png)
+
+### Key Architectural & Performance Differences
+
+| Feature / Dimension | Standard FFT (e.g. FFTW, kissFFT) | IntSpectrum |
+| :--- | :--- | :--- |
+| **Arithmetic Type** | Floating-Point (`float` / `double`) | Fixed-Point (Q8 / Q15 / Q16 Integer) |
+| **Dynamic Heap Allocation** | Required (Twiddle factor & Trig tables) | **Zero Heap** (100% Static Stack/Buffer) |
+| **Frequency Grid** | Uniform $F_s / N$ linear bin steps | **Arbitrary Custom Grid** (Log, Comb, Mel) |
+| **Inter-Bin Resolution** | Bin-quantized ($F_s / N$ error) | **Sub-bin continuous frequency precision** |
+| **Parametric Output** | Raw discrete bin magnitudes | **Direct Sines, Cosines, Amps, Wiener Gains** |
+| **Noise Filtering** | External post-processing | **Integrated Empirical Wiener Shrinkage** |
+
+Run `make benchmark` to run the FFT comparison benchmark:
+
+```sh
+==============================================================================
+           INT_SPECTRUM VS STANDARD FFT BENCHMARK SUITE
+==============================================================================
+
+[Benchmark] Frequency Accuracy on Off-Bin Inter-Tone Frequencies (N=512, Fs=8000Hz)
+Target Freq (Hz)   | FFT Bin Hz      | FFT Error (Hz)  | IntSpectrum Error (Hz)
+------------------------------------------------------------------------------
+123.45             | 125.00          | 1.5500          | 0.0002
+234.56             | 234.38          | 0.1850          | 0.0000
+345.67             | 343.75          | 1.9200          | 0.0003
+456.78             | 453.12          | 3.6550          | 0.0000
+567.89             | 562.50          | 5.3900          | 0.0001
+```
 
 ![Estimation Accuracy vs SNR](docs/images/snr_performance.png)
 
-The evaluation suite benchmarks multi-tone extraction accuracy across clean and noisy signals. Under 20 dB SNR, frequency error remains strictly under $0.05\text{ Hz}$ across a 512-point sample block ($F_s = 8000\text{ Hz}$).
+Under 20 dB SNR, multi-tone estimation error remains strictly under $0.05\text{ Hz}$ across a 512-point sample block ($F_s = 8000\text{ Hz}$).
 
 ---
 
@@ -81,6 +112,9 @@ make test
 
 # Run full evaluation benchmark suite
 make eval
+
+# Run benchmark comparison against standard FFT
+make benchmark
 
 # Launch the Linux GUI application
 make gui

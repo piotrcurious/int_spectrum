@@ -10,7 +10,7 @@ LIB = $(BUILD_DIR)/libint_spectrum.so
 DEMO_BRESENHAM = $(BUILD_DIR)/bresenham_demo
 TEST_CPP = $(BUILD_DIR)/test_int_spectrum
 
-.PHONY: all clean test gui eval
+.PHONY: all clean test gui eval benchmark
 
 all: $(LIB) $(DEMO_BRESENHAM) $(TEST_CPP)
 
@@ -35,6 +35,10 @@ test: $(LIB) $(TEST_CPP)
 eval: $(LIB)
 	@echo "--- Running Evaluation Suite ---"
 	@python3 $(TEST_DIR)/run_evaluation_suite.py
+
+benchmark: $(LIB)
+	@echo "--- Running FFT Comparison Benchmark ---"
+	@python3 $(TEST_DIR)/benchmark_vs_fft.py
 
 gui: $(LIB)
 	@python3 $(SRC_DIR)/int_spectrum_gui.py
