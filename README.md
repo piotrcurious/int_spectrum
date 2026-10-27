@@ -11,7 +11,7 @@ DSP frequency discriminator and multi-tone spectral analyzer using crude integer
 The repository includes:
 - **Core Library (`include/int_spectrum/`)**: Templated C++17 fixed-point DSP headers (`bresenham_spectrum.hpp`, `multi_tone_comb.hpp`) and C API header (`c_api.h`).
 - **Shared Library (`bin/libint_spectrum.so`)**: C-compatible shared library compiled for C, C++, and Python integrations.
-- **Evaluation & Test Suite (`tests/`)**: C++ unit tests, Python ctypes unit tests, automated DSP benchmark suite, FFT comparison benchmark, and documentation graph generator.
+- **Evaluation & Test Suite (`tests/`)**: C++ unit tests, Python ctypes unit tests, automated DSP benchmark suite, native C++ CPU cycle benchmark (`benchmark_cpu_cycles.cpp`), FFT comparison benchmark, and documentation graph generator.
 - **Linux GUI Application (`src/int_spectrum_gui.py` / `bin/int_spectrum_gui`)**: Full desktop GUI application for real-time evaluation, parameter tuning, synthetic signal generation, WAV audio file analysis, and live microphone streaming.
 
 ---
@@ -29,12 +29,14 @@ int_spectrum/
 │   └── int_spectrum_gui.py     # Linux Desktop GUI (Tkinter + Matplotlib)
 ├── bin/
 │   ├── libint_spectrum.so       # Compiled C API shared library
-│   └── int_spectrum_gui         # Executable GUI launcher wrapper
+│   ├── int_spectrum_gui         # Executable GUI launcher wrapper
+│   └── benchmark_cpu_cycles     # Native C++ CPU cycles benchmark binary
 ├── tests/
 │   ├── test_int_spectrum.cpp    # C++ unit tests runner
 │   ├── test_int_spectrum.py     # Python ctypes unit tests
 │   ├── run_evaluation_suite.py  # DSP benchmark suite runner
 │   ├── benchmark_vs_fft.py     # FFT comparison benchmark runner
+│   ├── benchmark_cpu_cycles.cpp# Native x86 RDTSC CPU cycles benchmark
 │   └── generate_doc_graphs.py   # Test chart & graph generator for docs
 ├── docs/images/                 # Documentation figures and test plots
 ├── Makefile                     # Build system for shared library, tests, GUI, and benchmarks
@@ -60,7 +62,7 @@ int_spectrum/
 
 ![FFT Comparison](docs/images/fft_vs_intspectrum.png)
 
-### Key Architectural & Performance Differences
+### Key Architectural & Feature Differences
 
 | Feature / Dimension | Standard FFT (e.g. FFTW, kissFFT) | IntSpectrum |
 | :--- | :--- | :--- |
@@ -71,14 +73,29 @@ int_spectrum/
 | **Parametric Output** | Raw discrete bin magnitudes | **Direct Sines, Cosines, Amps, Wiener Gains** |
 | **Noise Filtering** | External post-processing | **Integrated Empirical Wiener Shrinkage** |
 
-Run `make benchmark` to run the FFT comparison benchmark:
+---
+
+### CPU Clock Cycle & Accuracy Benchmark Metrics
+
+#### Native C++ CPU Cycles Benchmark (x86_64 RDTSC)
+
+Run `make benchmark` to measure raw CPU cycles and latency:
+
+| Block Size $N$ | IntSpectrum (Cycles/Block) | IntSpectrum (Cycles/Sample) | Radix-2 FFT (Cycles/Block) | Radix-2 FFT (Cycles/Sample) |
+| :---: | :---: | :---: | :---: | :---: |
+| **64** | 2,640,904 | ~41,264 | 2,427 | ~37.9 |
+| **128** | 6,426,326 | ~50,205 | 5,616 | ~43.9 |
+| **256** | 11,996,038 | ~46,859 | 12,348 | ~48.2 |
+| **512** | 26,494,676 | ~51,747 | 26,315 | ~51.4 |
+| **1024** | 50,462,799 | ~49,280 | 59,296 | ~57.9 |
+| **2048** | 69,480,826 | ~33,926 | 125,920 | ~61.5 |
+| **4096** | 121,334,271 | ~29,622 | 303,586 | ~74.1 |
+
+> **Note on Cycle Overhead**: `IntSpectrum` evaluates full non-uniform matching pursuit grids with CORDIC phase accumulators, multi-estimator consensus, and fixed-point Gram matrix refitting per block. This gives exact parametric sine/cosine parameters and sub-bin continuous accuracy without floating-point hardware or dynamic heap allocation.
+
+#### Off-Bin Inter-Tone Frequency Precision ($N=512, F_s=8000\text{ Hz}$)
 
 ```sh
-==============================================================================
-           INT_SPECTRUM VS STANDARD FFT BENCHMARK SUITE
-==============================================================================
-
-[Benchmark] Frequency Accuracy on Off-Bin Inter-Tone Frequencies (N=512, Fs=8000Hz)
 Target Freq (Hz)   | FFT Bin Hz      | FFT Error (Hz)  | IntSpectrum Error (Hz)
 ------------------------------------------------------------------------------
 123.45             | 125.00          | 1.5500          | 0.0002
@@ -104,7 +121,7 @@ Under 20 dB SNR, multi-tone estimation error remains strictly under $0.05\text{ 
 ### Build Commands
 
 ```sh
-# Build C++ shared library and tests
+# Build C++ shared library, tests, and benchmark binary
 make
 
 # Run unit tests (C++ and Python)
@@ -113,7 +130,7 @@ make test
 # Run full evaluation benchmark suite
 make eval
 
-# Run benchmark comparison against standard FFT
+# Run CPU cycle and FFT comparison benchmark
 make benchmark
 
 # Launch the Linux GUI application
