@@ -9,6 +9,36 @@
 using namespace int_spectrum;
 
 template <size_t N>
+static int fuse_estimates_dispatch(
+    const int16_t* samples,
+    uint32_t coarseBin,
+    IntSpectrumFusionResult* outFusion
+) {
+    using Analyzer = BresenhamSpectrum<N, 16, 12>;
+    Analyzer analyzer;
+    typename Analyzer::InputBlock in_block;
+    std::memcpy(in_block.data(), samples, sizeof(int16_t) * N);
+
+    typename Analyzer::DifferentialResult diff_res;
+    bool ok = analyzer.refineSingleTone(in_block, coarseBin, diff_res);
+    if (!ok) return 0;
+
+    outFusion->coarseBin = diff_res.coarse_bin;
+    outFusion->offsetQ16 = diff_res.offset_q16;
+    outFusion->phaseOffsetQ16 = diff_res.phase_offset_q16;
+    outFusion->frequencyQ16 = diff_res.frequency_q16;
+    outFusion->peakAmplitude = diff_res.peak_amplitude;
+    outFusion->strength = diff_res.strength;
+    outFusion->phaseDifferenceQ30 = diff_res.phase_difference_q30;
+    outFusion->estimatorValidMask = diff_res.estimator_valid_mask;
+    outFusion->estimatorInlierMask = diff_res.estimator_inlier_mask;
+    outFusion->consensusSpreadQ16 = diff_res.consensus_spread_q16;
+    outFusion->consensusConfidenceQ15 = diff_res.consensus_confidence_q15;
+    outFusion->selectedEstimator = diff_res.selected_estimator;
+    return 1;
+}
+
+template <size_t N>
 static int decompose_grid_dispatch(
     const int16_t* samples,
     const uint32_t* gridQ16,
@@ -270,6 +300,26 @@ int int_spectrum_decompose_comb(
     }
 }
 
+int int_spectrum_fuse_estimates(
+    size_t N,
+    const int16_t* samples,
+    uint32_t coarseBin,
+    IntSpectrumFusionResult* outFusion
+) {
+    if (!samples || !outFusion) return 0;
+
+    switch (N) {
+        case 64: return fuse_estimates_dispatch<64>(samples, coarseBin, outFusion);
+        case 128: return fuse_estimates_dispatch<128>(samples, coarseBin, outFusion);
+        case 256: return fuse_estimates_dispatch<256>(samples, coarseBin, outFusion);
+        case 512: return fuse_estimates_dispatch<512>(samples, coarseBin, outFusion);
+        case 1024: return fuse_estimates_dispatch<1024>(samples, coarseBin, outFusion);
+        case 2048: return fuse_estimates_dispatch<2048>(samples, coarseBin, outFusion);
+        case 4096: return fuse_estimates_dispatch<4096>(samples, coarseBin, outFusion);
+        default: return 0;
+    }
+}
+
 void int_spectrum_reconstruct_denoised(
     size_t N,
     const int16_t* samples,
@@ -291,7 +341,11 @@ uint64_t int_spectrum_residual_rms_q8(size_t N, const int64_t* residualQ8) {
     uint64_t energy = 0;
     for (size_t i = 0; i < N; ++i) {
         int64_t x = residualQ8[i];
-        uint64_t mag = static_cast<uint64_t>(x < 0 ? -x : x);
+        uint64_t mag = MultiToneComb<64, 1>::magnitude64(x);
+        if (mag != 0 && mag > (std::numeric_limits<uint64_t>::max() - energy) / mag) {
+            energy = std::numeric_limits<uint64_t>::max();
+            break;
+        }
         energy += mag * mag;
     }
     uint64_t val = energy / N;

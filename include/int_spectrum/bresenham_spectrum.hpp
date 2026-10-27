@@ -25,6 +25,7 @@ class BresenhamSpectrum {
     static constexpr std::uint32_t PHASE_INDEX_SHIFT = 32U - LUT_BITS;
     static constexpr std::int64_t Q15_ONE = 32767;
     static constexpr std::int64_t PI_Q30 = 3373259426LL;
+    static constexpr std::int64_t ONE_Q30 = std::int64_t{1} << 30;
 
 public:
     struct Result {
@@ -43,6 +44,12 @@ public:
         std::uint32_t peak_amplitude = 0;
         std::uint64_t strength = 0;
         std::int64_t phase_difference_q30 = 0;
+
+        std::uint32_t estimator_valid_mask = 0;
+        std::uint32_t estimator_inlier_mask = 0;
+        std::uint32_t consensus_spread_q16 = 0;
+        std::uint16_t consensus_confidence_q15 = 0;
+        std::uint8_t selected_estimator = 0xFFU;
     };
 
     using InputBlock = std::array<std::int16_t, N>;
@@ -145,13 +152,16 @@ public:
 
         std::int64_t offsetQ16 = 0;
         bool haveOffset = false;
+        std::uint8_t selectedEstimator = 0xFFU;
 
         if (recurrenceValid) {
             offsetQ16 = recurrenceOffsetQ16;
             haveOffset = true;
+            selectedEstimator = 2U; // lag_recurrence
         } else if (phaseValid) {
             offsetQ16 = phaseOffsetQ16;
             haveOffset = true;
+            selectedEstimator = 0U; // half_block_phase
         }
 
         if (!haveOffset) return false;
@@ -176,6 +186,12 @@ public:
         out.peak_amplitude = amplitude;
         out.strength = strength;
         out.phase_difference_q30 = angleQ30;
+        out.estimator_valid_mask = (phaseValid ? 1U : 0U) | (recurrenceValid ? 4U : 0U);
+        out.estimator_inlier_mask = out.estimator_valid_mask;
+        out.consensus_spread_q16 = (phaseValid && recurrenceValid) ?
+            static_cast<std::uint32_t>(std::abs(phaseOffsetQ16 - recurrenceOffsetQ16)) : 0U;
+        out.consensus_confidence_q15 = 32767U;
+        out.selected_estimator = selectedEstimator;
         return true;
     }
 
@@ -312,8 +328,7 @@ private:
 
         std::int64_t z = 0;
         if (x < 0) {
-            if (y >= 0) z = PI_Q30;
-            else z = -PI_Q30;
+            z = (y >= 0) ? PI_Q30 : -PI_Q30;
             x = -x;
             y = -y;
         }

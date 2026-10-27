@@ -31,6 +31,21 @@ typedef struct {
     uint16_t tonesSuppressed;
 } IntSpectrumWienerReport;
 
+typedef struct {
+    uint32_t coarseBin;
+    int32_t offsetQ16;
+    int32_t phaseOffsetQ16;
+    uint32_t frequencyQ16;
+    uint32_t peakAmplitude;
+    uint64_t strength;
+    int64_t phaseDifferenceQ30;
+    uint32_t estimatorValidMask;
+    uint32_t estimatorInlierMask;
+    uint32_t consensusSpreadQ16;
+    uint16_t consensusConfidenceQ15;
+    uint8_t selectedEstimator;
+} IntSpectrumFusionResult;
+
 // Grid generator functions
 int int_spectrum_make_linear_grid(size_t N, double minHz, double maxHz, double sampleRateHz,
                                   uint32_t* outGridQ16, size_t gridPoints);
@@ -42,7 +57,7 @@ double int_spectrum_bin_q16_to_hz(size_t N, uint32_t binQ16, double sampleRateHz
 uint32_t int_spectrum_hz_to_bin_q16(size_t N, double hz, double sampleRateHz);
 
 // Main dynamic multi-tone decomposition function supporting standard block sizes
-// N in {128, 256, 512, 1024, 2048, 4096}, maxTones <= 16
+// N in {64, 128, 256, 512, 1024, 2048, 4096}, maxTones <= 16
 int int_spectrum_decompose_grid(
     size_t N,
     const int16_t* samples,
@@ -69,6 +84,13 @@ int int_spectrum_decompose_comb(
     size_t* outToneCount,
     int64_t* outResidualQ8,
     int32_t* outRemovedDc
+);
+
+int int_spectrum_fuse_estimates(
+    size_t N,
+    const int16_t* samples,
+    uint32_t coarseBin,
+    IntSpectrumFusionResult* outFusion
 );
 
 void int_spectrum_reconstruct_denoised(
