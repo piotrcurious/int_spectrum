@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate test graphs for documentation.
+Generate test graphs for documentation, including FFT comparison charts.
 """
 
 import os
@@ -148,6 +148,59 @@ def generate_graphs():
     plt.savefig('docs/images/snr_performance.png', facecolor=fig.get_facecolor(), edgecolor='none')
     plt.close()
     print("Saved docs/images/snr_performance.png")
+
+    # Graph 3: FFT vs IntSpectrum Accuracy Comparison
+    target_test_freqs = np.linspace(120.0, 580.0, 15)
+    fft_errs = []
+    int_errs = []
+    bin_width = Fs / N  # 15.625 Hz
+
+    for tf in target_test_freqs:
+        t_sig = (10000.0 * np.cos(2 * np.pi * tf * t)).astype(np.int16)
+
+        # FFT peak
+        fft_peak_idx = np.argmax(np.abs(np.fft.rfft(t_sig)))
+        fft_f = fft_peak_idx * bin_width
+        fft_errs.append(abs(fft_f - tf))
+
+        # IntSpectrum peak
+        c_tsig = t_sig.ctypes.data_as(ctypes.POINTER(ctypes.c_int16))
+        c_t_tones = (IntSpectrumTone * 5)()
+        c_t_cnt = ctypes.c_size_t(0)
+        c_t_res = (ctypes.c_int64 * N)()
+        c_t_dc = ctypes.c_int32(0)
+
+        api.lib.int_spectrum_decompose_grid(
+            N, c_tsig, grid, 129, 300, 1, c_t_tones, ctypes.byref(c_t_cnt), c_t_res, ctypes.byref(c_t_dc), None, None
+        )
+        if c_t_cnt.value > 0:
+            int_f = api.lib.int_spectrum_bin_q16_to_hz(N, c_t_tones[0].frequencyQ16, Fs)
+            int_errs.append(abs(int_f - tf))
+        else:
+            int_errs.append(0.0)
+
+    fig, ax = plt.subplots(figsize=(9, 4.5), dpi=150)
+    fig.patch.set_facecolor('#1e222a')
+    ax.set_facecolor('#21252b')
+    ax.tick_params(colors='white')
+    ax.xaxis.label.set_color('white')
+    ax.yaxis.label.set_color('white')
+    ax.title.set_color('white')
+    ax.grid(True, color='#3a3f4b', linestyle='--', alpha=0.5)
+    for spine in ax.spines.values():
+        spine.set_color('#3a3f4b')
+
+    ax.plot(target_test_freqs, fft_errs, 's--', color='#e06c75', lw=1.8, label=f'Standard FFT Bin Quantization Error (Step={bin_width:.2f}Hz)')
+    ax.plot(target_test_freqs, int_errs, 'o-', color='#98c379', lw=2.2, label='IntSpectrum Continuous Sub-Bin Precision')
+    ax.set_title("Frequency Accuracy Comparison: Standard Discrete FFT vs. IntSpectrum Sub-Bin Fitting", fontsize=11, pad=8)
+    ax.set_xlabel("Target Input Frequency (Hz)")
+    ax.set_ylabel("Absolute Frequency Error (Hz)")
+    ax.legend(facecolor='#282c34', edgecolor='none', labelcolor='white')
+
+    plt.tight_layout()
+    plt.savefig('docs/images/fft_vs_intspectrum.png', facecolor=fig.get_facecolor(), edgecolor='none')
+    plt.close()
+    print("Saved docs/images/fft_vs_intspectrum.png")
 
 if __name__ == '__main__':
     generate_graphs()
