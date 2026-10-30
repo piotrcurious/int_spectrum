@@ -202,11 +202,18 @@ class IntSpectrumGUI(tk.Tk):
         self.last_detected_tones = []
         self.last_fusion_result = None
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self._build_gui()
         self._on_params_changed()
 
         # Periodically refresh live GUI
         self.after(40, self._gui_update_loop)
+
+    def _on_close(self):
+        self.is_streaming = False
+        self.is_file_playing = False
+        self.destroy()
 
     def _build_gui(self):
         # Top Header Bar

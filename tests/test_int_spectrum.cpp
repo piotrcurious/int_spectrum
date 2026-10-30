@@ -26,7 +26,6 @@ static int g_tests_failed = 0;
 void test_single_tone_bresenham() {
     constexpr size_t N = 256;
     constexpr size_t DETECTORS = 11;
-    constexpr double Fs = 8000.0;
     constexpr double target_bin = 14.25;
     constexpr double target_amp = 10000.0;
 
