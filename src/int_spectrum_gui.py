@@ -4,7 +4,7 @@ int_spectrum_gui.py
 Full-featured, modern Linux GUI application for integer spectrum analysis, evaluation, and testing.
 Supports synthetic signal synthesis (Sine, Square, Sawtooth, Chirp), WAV file loading/playback,
 live microphone / simulated streaming, multi-tab Matplotlib visualizations (Time/Spectrum, Spectrogram/Waterfall,
-Estimator Fusion & Residuals), export to CSV/PNG, and full DSP parameter controls.
+Harmonic Analysis & Consensus Diagnostics), WAV recording, audio audio playback, and full DSP parameter controls.
 """
 
 import sys
@@ -26,7 +26,7 @@ matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-# Safely try importing sounddevice for live microphone input
+# Safely try importing sounddevice for live microphone input and audio playback
 HAS_SOUNDDEVICE = False
 try:
     import sounddevice as sd
@@ -127,9 +127,9 @@ class IntSpectrumFusionResult(ctypes.Structure):
 class IntSpectrumGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("int_spectrum — Integer DSP Evaluation & Test Suite")
-        self.geometry("1380x880")
-        self.minsize(1100, 720)
+        self.title("int_spectrum — Modern Linux Integer DSP Evaluation & Test Suite")
+        self.geometry("1420x920")
+        self.minsize(1120, 740)
 
         # Initialize C DSP Library
         try:
@@ -142,19 +142,19 @@ class IntSpectrumGUI(tk.Tk):
             messagebox.showerror("Library Error", f"Failed to load libint_spectrum.so: {e}\nPlease run 'make' first.")
             sys.exit(1)
 
-        # Apply dark styling theme
+        # Apply custom dark theme styling
         self.style = ttk.Style()
         self.style.theme_use('clam')
-        self.style.configure('.', background='#21252b', foreground='#abb2bf', fieldbackground='#282c34')
-        self.style.configure('TNotebook', background='#21252b', borderwidth=0)
-        self.style.configure('TNotebook.Tab', background='#2c313a', foreground='#abb2bf', padding=[10, 4])
-        self.style.map('TNotebook.Tab', background=[('selected', '#3e4451')], foreground=[('selected', '#ffffff')])
-        self.style.configure('TLabelframe', background='#21252b', foreground='#61afef', bordercolor='#3e4451')
-        self.style.configure('TLabelframe.Label', background='#21252b', foreground='#61afef', font=('Helvetica', 10, 'bold'))
+        self.style.configure('.', background='#1e222a', foreground='#abb2bf', fieldbackground='#21252b')
+        self.style.configure('TNotebook', background='#1e222a', borderwidth=0)
+        self.style.configure('TNotebook.Tab', background='#282c34', foreground='#abb2bf', padding=[12, 5], font=('Helvetica', 9, 'bold'))
+        self.style.map('TNotebook.Tab', background=[('selected', '#3b4048')], foreground=[('selected', '#61afef')])
+        self.style.configure('TLabelframe', background='#1e222a', foreground='#61afef', bordercolor='#3b4048')
+        self.style.configure('TLabelframe.Label', background='#1e222a', foreground='#61afef', font=('Helvetica', 10, 'bold'))
 
-        # State Variables
+        # DSP & Audio State
         self.input_mode = tk.StringVar(value="generated") # "generated", "file", "live"
-        self.waveform_type = tk.StringVar(value="Sine Multi-Tone") # "Sine Multi-Tone", "Square Wave", "Sawtooth", "Chirp Sweep"
+        self.waveform_type = tk.StringVar(value="Sine Multi-Tone")
         self.sample_rate = tk.DoubleVar(value=8000.0)
         self.block_size = tk.IntVar(value=512)
         self.max_tones = tk.IntVar(value=5)
@@ -164,14 +164,18 @@ class IntSpectrumGUI(tk.Tk):
         self.grid_min_hz = tk.DoubleVar(value=100.0)
         self.grid_max_hz = tk.DoubleVar(value=700.0)
 
-        # Wiener filter options
+        # Visualizations & Customization Options
+        self.freq_scale_mode = tk.StringVar(value="linear") # "linear", "log"
+        self.waterfall_cmap = tk.StringVar(value="magma") # "magma", "viridis", "plasma", "coolwarm"
+        self.show_peak_markers = tk.BooleanVar(value=True)
+
+        # Wiener Filter Options
         self.use_wiener = tk.BooleanVar(value=False)
         self.wiener_noise_scale = tk.DoubleVar(value=1.0)
 
-        # Signal Generator state (5 tone channels)
+        # Synthesizer State (5 Channels)
         self.dc_offset = tk.DoubleVar(value=1800.0)
         self.noise_std = tk.DoubleVar(value=0.0)
-
         self.tones_config = [
             {"freq": tk.DoubleVar(value=222.65625), "amp": tk.DoubleVar(value=12000.0), "enable": tk.BooleanVar(value=True)},
             {"freq": tk.DoubleVar(value=432.03125), "amp": tk.DoubleVar(value=6500.0), "enable": tk.BooleanVar(value=True)},
@@ -180,22 +184,23 @@ class IntSpectrumGUI(tk.Tk):
             {"freq": tk.DoubleVar(value=2500.0),    "amp": tk.DoubleVar(value=1500.0), "enable": tk.BooleanVar(value=False)},
         ]
 
-        # File & Playback state
+        # File & Playback State
         self.audio_file_path = ""
         self.audio_samples = None
         self.file_read_pos = 0
         self.is_file_playing = False
 
-        # Live streaming state
+        # Live Input & Audio Playback State
         self.is_streaming = False
         self.stream_thread = None
-        self.audio_queue = queue.Queue(maxsize=15)
+        self.audio_queue = queue.Queue(maxsize=20)
+        self.audio_playback_active = False
 
         # Waterfall / Spectrogram History Buffer
         self.waterfall_history = []
-        self.max_waterfall_history = 30
+        self.max_waterfall_history = 35
 
-        # Last Analysis Results
+        # Last Analysis Results Cache
         self.last_input_samples = None
         self.last_model_samples = None
         self.last_residual_samples = None
@@ -207,36 +212,46 @@ class IntSpectrumGUI(tk.Tk):
         self._build_gui()
         self._on_params_changed()
 
-        # Periodically refresh live GUI
+        # Periodically refresh GUI
         self.after(40, self._gui_update_loop)
 
     def _on_close(self):
         self.is_streaming = False
         self.is_file_playing = False
+        self.audio_playback_active = False
         self.destroy()
 
     def _build_gui(self):
         # Top Header Bar
-        hdr_frame = tk.Frame(self, bg='#1e2227', height=40)
+        hdr_frame = tk.Frame(self, bg='#181a1f', height=42)
         hdr_frame.pack(fill=tk.X, side=tk.TOP)
-        title_lbl = tk.Label(hdr_frame, text="INT_SPECTRUM — Embedded Integer DSP Test Suite & Visualization",
-                             bg='#1e2227', fg='#98c379', font=('Helvetica', 12, 'bold'))
-        title_lbl.pack(side=tk.LEFT, padx=15, pady=5)
 
-        # Export Buttons on top bar
-        btn_exp_csv = tk.Button(hdr_frame, text="Export CSV", bg='#3e4451', fg='#ffffff', activebackground='#4b5263',
-                                bd=0, padx=10, command=self._export_csv)
-        btn_exp_csv.pack(side=tk.RIGHT, padx=5, pady=5)
+        title_lbl = tk.Label(hdr_frame, text="INT_SPECTRUM — Fixed-Point DSP Test Suite & Visualization",
+                             bg='#181a1f', fg='#98c379', font=('Helvetica', 12, 'bold'))
+        title_lbl.pack(side=tk.LEFT, padx=15, pady=6)
 
-        btn_exp_png = tk.Button(hdr_frame, text="Save Plot PNG", bg='#3e4451', fg='#ffffff', activebackground='#4b5263',
-                                bd=0, padx=10, command=self._export_png)
-        btn_exp_png.pack(side=tk.RIGHT, padx=5, pady=5)
+        # Quick Action Buttons
+        btn_rec_wav = tk.Button(hdr_frame, text="Record/Save WAV", bg='#e06c75', fg='#ffffff',
+                                activebackground='#be5046', bd=0, padx=10, pady=2, command=self._save_audio_wav)
+        btn_rec_wav.pack(side=tk.RIGHT, padx=5, pady=6)
 
-        # Paned Window (Left Controls / Right Notebook Plots)
+        btn_play_audio = tk.Button(hdr_frame, text="Play Audio Audio", bg='#98c379', fg='#1e222a',
+                                   activebackground='#7da85e', bd=0, padx=10, pady=2, command=self._play_current_audio)
+        btn_play_audio.pack(side=tk.RIGHT, padx=5, pady=6)
+
+        btn_exp_csv = tk.Button(hdr_frame, text="Export CSV", bg='#3b4048', fg='#ffffff',
+                                activebackground='#4b5263', bd=0, padx=10, pady=2, command=self._export_csv)
+        btn_exp_csv.pack(side=tk.RIGHT, padx=5, pady=6)
+
+        btn_exp_png = tk.Button(hdr_frame, text="Save Plot PNG", bg='#3b4048', fg='#ffffff',
+                                activebackground='#4b5263', bd=0, padx=10, pady=2, command=self._export_png)
+        btn_exp_png.pack(side=tk.RIGHT, padx=5, pady=6)
+
+        # Paned Window (Left Controls / Right Plots)
         main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        left_frame = ttk.Frame(main_paned, width=420)
+        left_frame = ttk.Frame(main_paned, width=440)
         main_paned.add(left_frame, weight=0)
 
         right_frame = ttk.Frame(main_paned)
@@ -247,12 +262,16 @@ class IntSpectrumGUI(tk.Tk):
         ctrl_notebook.pack(fill=tk.BOTH, expand=True)
 
         source_tab = ttk.Frame(ctrl_notebook, padding=8)
-        ctrl_notebook.add(source_tab, text="Signal Synthesizer")
+        ctrl_notebook.add(source_tab, text="Synthesizer & Input")
         self._build_source_tab(source_tab)
 
         dsp_tab = ttk.Frame(ctrl_notebook, padding=8)
-        ctrl_notebook.add(dsp_tab, text="DSP & Grid Config")
+        ctrl_notebook.add(dsp_tab, text="DSP Params & Grid")
         self._build_dsp_tab(dsp_tab)
+
+        viz_tab = ttk.Frame(ctrl_notebook, padding=8)
+        ctrl_notebook.add(viz_tab, text="Display & Themes")
+        self._build_viz_tab(viz_tab)
 
         # --- RIGHT PANEL: VISUALIZATION TABS ---
         self.plot_notebook = ttk.Notebook(right_frame)
@@ -262,9 +281,9 @@ class IntSpectrumGUI(tk.Tk):
         tab_overview = ttk.Frame(self.plot_notebook)
         self.plot_notebook.add(tab_overview, text="Time & Spectrum Overview")
 
-        self.fig_overview = Figure(figsize=(8, 5.5), dpi=100, facecolor='#21252b')
-        self.ax_time = self.fig_overview.add_subplot(211, facecolor='#282c34')
-        self.ax_freq = self.fig_overview.add_subplot(212, facecolor='#282c34')
+        self.fig_overview = Figure(figsize=(8, 5.5), dpi=100, facecolor='#1e222a')
+        self.ax_time = self.fig_overview.add_subplot(211, facecolor='#21252b')
+        self.ax_freq = self.fig_overview.add_subplot(212, facecolor='#21252b')
         self.fig_overview.tight_layout(pad=2.5)
 
         self.canvas_overview = FigureCanvasTkAgg(self.fig_overview, master=tab_overview)
@@ -274,22 +293,22 @@ class IntSpectrumGUI(tk.Tk):
         tab_waterfall = ttk.Frame(self.plot_notebook)
         self.plot_notebook.add(tab_waterfall, text="Waterfall & Residual Analysis")
 
-        self.fig_waterfall = Figure(figsize=(8, 5.5), dpi=100, facecolor='#21252b')
-        self.ax_waterfall = self.fig_waterfall.add_subplot(211, facecolor='#282c34')
-        self.ax_hist = self.fig_waterfall.add_subplot(212, facecolor='#282c34')
+        self.fig_waterfall = Figure(figsize=(8, 5.5), dpi=100, facecolor='#1e222a')
+        self.ax_waterfall = self.fig_waterfall.add_subplot(211, facecolor='#21252b')
+        self.ax_hist = self.fig_waterfall.add_subplot(212, facecolor='#21252b')
         self.fig_waterfall.tight_layout(pad=2.5)
 
         self.canvas_waterfall = FigureCanvasTkAgg(self.fig_waterfall, master=tab_waterfall)
         self.canvas_waterfall.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # Tab 3: Estimator Fusion & Consensus Diagnostics
+        # Tab 3: Harmonic Analysis & Estimator Consensus
         tab_fusion = ttk.Frame(self.plot_notebook)
-        self.plot_notebook.add(tab_fusion, text="Multi-Estimator Consensus")
+        self.plot_notebook.add(tab_fusion, text="Consensus & Harmonics")
 
-        self.fusion_text = tk.Text(tab_fusion, bg='#282c34', fg='#61afef', font=('Monospace', 10), wrap=tk.WORD)
-        self.fusion_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.fusion_text = tk.Text(tab_fusion, bg='#21252b', fg='#61afef', font=('Monospace', 10), wrap=tk.WORD)
+        self.fusion_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # Bottom Results Table & Status
+        # Bottom Results Table & Status Bar
         results_frame = ttk.LabelFrame(right_frame, text="Decomposition Results Table", padding=5)
         results_frame.pack(fill=tk.X, padx=5, pady=5)
 
@@ -313,7 +332,6 @@ class IntSpectrumGUI(tk.Tk):
         self.status_label.pack(fill=tk.Y, side=tk.RIGHT, padx=10)
 
     def _build_source_tab(self, parent):
-        # Input Mode Selector
         mode_frame = ttk.LabelFrame(parent, text="Input Source Mode", padding=5)
         mode_frame.pack(fill=tk.X, pady=4)
 
@@ -321,7 +339,6 @@ class IntSpectrumGUI(tk.Tk):
         ttk.Radiobutton(mode_frame, text="WAV Audio File", variable=self.input_mode, value="file", command=self._on_params_changed).pack(anchor=tk.W)
         ttk.Radiobutton(mode_frame, text="Live / Continuous Stream", variable=self.input_mode, value="live", command=self._on_params_changed).pack(anchor=tk.W)
 
-        # File Controls Frame
         file_frame = ttk.LabelFrame(parent, text="Audio File Controls", padding=5)
         file_frame.pack(fill=tk.X, pady=4)
 
@@ -334,7 +351,6 @@ class IntSpectrumGUI(tk.Tk):
         self.btn_play_file = ttk.Button(file_btns, text="Play Continuous", command=self._toggle_file_playback)
         self.btn_play_file.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        # Waveform & Synthesizer Frame
         gen_frame = ttk.LabelFrame(parent, text="Synthetic Waveform Synthesizer", padding=5)
         gen_frame.pack(fill=tk.X, pady=4)
 
@@ -349,7 +365,6 @@ class IntSpectrumGUI(tk.Tk):
         ttk.Label(gen_frame, text="Noise StdDev:").grid(row=2, column=0, sticky=tk.W)
         ttk.Entry(gen_frame, textvariable=self.noise_std, width=10).grid(row=2, column=1, sticky=tk.W)
 
-        # 5 Configurable Tone Channels
         for idx, t_cfg in enumerate(self.tones_config):
             r = 3 + idx * 2
             ttk.Checkbutton(gen_frame, text=f"Tone {idx+1}", variable=t_cfg["enable"], command=self._on_params_changed).grid(row=r, column=0, sticky=tk.W, pady=(4,0))
@@ -358,7 +373,6 @@ class IntSpectrumGUI(tk.Tk):
             ttk.Label(gen_frame, text=" Amp:").grid(row=r+1, column=2, sticky=tk.W)
             ttk.Entry(gen_frame, textvariable=t_cfg["amp"], width=8).grid(row=r+1, column=3, sticky=tk.W)
 
-        # Live Streaming Controls
         live_frame = ttk.LabelFrame(parent, text="Live Input / Streaming", padding=5)
         live_frame.pack(fill=tk.X, pady=4)
 
@@ -408,6 +422,23 @@ class IntSpectrumGUI(tk.Tk):
         ttk.Checkbutton(wiener_frame, text="Enable Wiener Shrinkage", variable=self.use_wiener, command=self._on_params_changed).pack(anchor=tk.W)
         ttk.Label(wiener_frame, text="Noise Power Scale:").pack(anchor=tk.W)
         ttk.Entry(wiener_frame, textvariable=self.wiener_noise_scale, width=12).pack(anchor=tk.W)
+
+    def _build_viz_tab(self, parent):
+        viz_frame = ttk.LabelFrame(parent, text="Plot Customization Options", padding=5)
+        viz_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(viz_frame, text="Freq Axis Scale:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        scale_cb = ttk.Combobox(viz_frame, textvariable=self.freq_scale_mode, values=["linear", "log"], state="readonly", width=12)
+        scale_cb.grid(row=0, column=1, sticky=tk.W, pady=2)
+        scale_cb.bind("<<ComboboxSelected>>", lambda e: self._render_active_tab(self.sample_rate.get(), self.block_size.get()))
+
+        ttk.Label(viz_frame, text="Waterfall Colormap:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        cmap_cb = ttk.Combobox(viz_frame, textvariable=self.waterfall_cmap, values=["magma", "viridis", "plasma", "inferno", "coolwarm"], state="readonly", width=12)
+        cmap_cb.grid(row=1, column=1, sticky=tk.W, pady=2)
+        cmap_cb.bind("<<ComboboxSelected>>", lambda e: self._render_active_tab(self.sample_rate.get(), self.block_size.get()))
+
+        ttk.Checkbutton(viz_frame, text="Show Peak Frequency Markers", variable=self.show_peak_markers,
+                        command=lambda: self._render_active_tab(self.sample_rate.get(), self.block_size.get())).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
 
     def _browse_wav_file(self):
         filename = filedialog.askopenfilename(filetypes=[("WAV files", "*.wav"), ("All files", "*.*")])
@@ -478,7 +509,6 @@ class IntSpectrumGUI(tk.Tk):
             except Exception as e:
                 print(f"Hardware audio device fallback: {e}")
 
-        # Fallback simulated live stream
         t_accum = 0.0
         while self.is_streaming:
             N = self.block_size.get()
@@ -495,6 +525,37 @@ class IntSpectrumGUI(tk.Tk):
             if not self.audio_queue.full():
                 self.audio_queue.put(int_samples)
             time.sleep(N / Fs)
+
+    def _play_current_audio(self):
+        if self.last_input_samples is None:
+            messagebox.showwarning("Audio Error", "No active signal buffer to play.")
+            return
+
+        if HAS_SOUNDDEVICE:
+            try:
+                samples_float = self.last_input_samples.astype(np.float32) / 32768.0
+                sd.play(samples_float, int(self.sample_rate.get()))
+            except Exception as e:
+                messagebox.showerror("Audio Playback Error", f"Sounddevice error: {e}")
+        else:
+            messagebox.showinfo("Audio Playback", "PortAudio/sounddevice not available in headless environment.")
+
+    def _save_audio_wav(self):
+        if self.last_input_samples is None:
+            messagebox.showwarning("Save Error", "No active signal buffer to save.")
+            return
+
+        filename = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=[("WAV files", "*.wav")])
+        if filename:
+            try:
+                with wave.open(filename, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(int(self.sample_rate.get()))
+                    wf.writeframes(self.last_input_samples.tobytes())
+                messagebox.showinfo("Save Success", f"Saved audio block to {os.path.basename(filename)}")
+            except Exception as e:
+                messagebox.showerror("Save Error", f"Failed to save WAV: {e}")
 
     def _gui_update_loop(self):
         if self.is_streaming and not self.audio_queue.empty():
@@ -671,16 +732,21 @@ class IntSpectrumGUI(tk.Tk):
             self.ax_time.set_xlabel("Time (ms)", color="#abb2bf")
             self.ax_time.set_ylabel("Amplitude", color="#abb2bf")
             self.ax_time.tick_params(colors='#abb2bf')
-            self.ax_time.legend(loc="upper right", fontsize=8, facecolor='#282c34', edgecolor='#3e4451', labelcolor='#abb2bf')
+            self.ax_time.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
             self.ax_time.grid(True, linestyle=":", alpha=0.4)
 
             self.ax_freq.clear()
             fft_mags = np.abs(np.fft.rfft(self.last_input_samples)) * (2.0 / N)
             fft_freqs = np.fft.rfftfreq(N, d=1.0/Fs)
 
+            if self.freq_scale_mode.get() == "log":
+                self.ax_freq.set_xscale("log")
+            else:
+                self.ax_freq.set_xscale("linear")
+
             self.ax_freq.plot(fft_freqs, fft_mags, label="Reference FFT Spectrum", color="#abb2bf", alpha=0.4)
 
-            if self.last_detected_tones:
+            if self.show_peak_markers.get() and self.last_detected_tones:
                 det_freqs, det_amps = zip(*self.last_detected_tones)
                 self.ax_freq.vlines(det_freqs, 0, det_amps, color="#e06c75", linewidth=2, label="IntSpectrum Tones")
                 self.ax_freq.scatter(det_freqs, det_amps, color="#e06c75", zorder=5)
@@ -688,9 +754,10 @@ class IntSpectrumGUI(tk.Tk):
             self.ax_freq.set_title("Frequency Domain Spectrum (FFT vs Integer Grid Tones)", color="#abb2bf")
             self.ax_freq.set_xlabel("Frequency (Hz)", color="#abb2bf")
             self.ax_freq.set_ylabel("Peak Amplitude", color="#abb2bf")
-            self.ax_freq.set_xlim(0, Fs / 2.0)
+            if self.freq_scale_mode.get() == "linear":
+                self.ax_freq.set_xlim(0, Fs / 2.0)
             self.ax_freq.tick_params(colors='#abb2bf')
-            self.ax_freq.legend(loc="upper right", fontsize=8, facecolor='#282c34', edgecolor='#3e4451', labelcolor='#abb2bf')
+            self.ax_freq.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
             self.ax_freq.grid(True, linestyle=":", alpha=0.4)
 
             self.fig_overview.tight_layout(pad=1.5)
@@ -701,9 +768,8 @@ class IntSpectrumGUI(tk.Tk):
             self.ax_waterfall.clear()
             if self.waterfall_history:
                 wf_mat = np.array(self.waterfall_history)
-                fft_freqs = np.fft.rfftfreq(N, d=1.0/Fs)
                 self.ax_waterfall.imshow(wf_mat, aspect='auto', origin='lower',
-                                         extent=[0, Fs/2, 0, len(wf_mat)], cmap='magma')
+                                         extent=[0, Fs/2, 0, len(wf_mat)], cmap=self.waterfall_cmap.get())
             self.ax_waterfall.set_title("Spectral Waterfall / Spectrogram History", color="#abb2bf")
             self.ax_waterfall.set_xlabel("Frequency (Hz)", color="#abb2bf")
             self.ax_waterfall.set_ylabel("Block Frame", color="#abb2bf")
@@ -711,7 +777,7 @@ class IntSpectrumGUI(tk.Tk):
 
             self.ax_hist.clear()
             if self.last_residual_samples is not None:
-                self.ax_hist.hist(self.last_residual_samples, bins=30, color="#98c379", alpha=0.7, edgecolor="#21252b")
+                self.ax_hist.hist(self.last_residual_samples, bins=30, color="#98c379", alpha=0.7, edgecolor="#1e222a")
             self.ax_hist.set_title("Residual Error Amplitude Histogram", color="#abb2bf")
             self.ax_hist.set_xlabel("Residual Error (samples)", color="#abb2bf")
             self.ax_hist.set_ylabel("Count", color="#abb2bf")
@@ -722,16 +788,17 @@ class IntSpectrumGUI(tk.Tk):
             self.canvas_waterfall.draw()
 
         elif curr_tab == 2:
-            # Estimator Fusion Tab
+            # Estimator Fusion & Harmonic Analysis Tab
             self.fusion_text.delete("1.0", tk.END)
+            report_str = f"===============================================================\n"
+            report_str += f"         MULTI-ESTIMATOR CONSENSUS & HARMONIC ANALYSIS         \n"
+            report_str += f"===============================================================\n\n"
+
             if self.last_fusion_result is not None:
                 fr = self.last_fusion_result
                 estimator_names = {0: "Half-Block Phase", 1: "First-Difference", 2: "Lag Recurrence", 3: "Parabolic Spectrum"}
                 selected_name = estimator_names.get(fr.selectedEstimator, f"Estimator #{fr.selectedEstimator}")
 
-                report_str = f"===============================================================\n"
-                report_str += f"         MULTI-ESTIMATOR CONSENSUS FUSION DIAGNOSTICS          \n"
-                report_str += f"===============================================================\n\n"
                 report_str += f"Target Coarse Bin       : {fr.coarseBin} (~{fr.coarseBin * Fs / N:.2f} Hz)\n"
                 report_str += f"Fused Frequency (Q16)   : {fr.frequencyQ16} (~{fr.frequencyQ16 * Fs / (N * 65536.0):.3f} Hz)\n"
                 report_str += f"Refined Offset (Q16)    : {fr.offsetQ16} ({fr.offsetQ16 / 65536.0:+.4f} bins)\n"
@@ -752,10 +819,31 @@ class IntSpectrumGUI(tk.Tk):
                     inlier = bool(fr.estimatorInlierMask & (1 << code))
                     status = "INLIER" if inlier else ("VALID" if valid else "DISABLED")
                     report_str += f"  - [{status:<8}] {name}\n"
-
-                self.fusion_text.insert(tk.END, report_str)
             else:
-                self.fusion_text.insert(tk.END, "No tone active for consensus fusion diagnostics.")
+                report_str += "No tone active for consensus fusion diagnostics.\n\n"
+
+            # Harmonic Analysis Section
+            report_str += f"\n===============================================================\n"
+            report_str += f"                     HARMONIC SPECTRUM SUMMARY                 \n"
+            report_str += f"===============================================================\n"
+
+            if self.last_detected_tones:
+                f0_hz, f0_amp = self.last_detected_tones[0]
+                report_str += f"Fundamental F0 Candidate: {f0_hz:.2f} Hz (Peak Amp: {f0_amp})\n"
+                harm_amps = []
+                for idx, (hz, amp) in enumerate(self.last_detected_tones):
+                    ratio = hz / f0_hz if f0_hz > 0 else 0
+                    report_str += f"  Tone #{idx+1}: {hz:>8.2f} Hz | Amp: {amp:>7} | Ratio to F0: {ratio:.2f}x\n"
+                    if idx > 0:
+                        harm_amps.append(amp)
+
+                if harm_amps and f0_amp > 0:
+                    thd_est = (math.sqrt(sum(a**2 for a in harm_amps)) / f0_amp) * 100.0
+                    report_str += f"\nEstimated Total Harmonic Ratio (THD): {thd_est:.2f}%\n"
+            else:
+                report_str += "No tones extracted in current frame.\n"
+
+            self.fusion_text.insert(tk.END, report_str)
 
     def _export_csv(self):
         if not self.last_detected_tones:
