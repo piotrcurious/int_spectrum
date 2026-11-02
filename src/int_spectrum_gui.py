@@ -667,14 +667,31 @@ class IntSpectrumGUI(tk.Tk):
 
     def _run_analysis_on_samples(self, samples):
         N = len(samples)
-        Fs = self.sample_rate.get()
+        try:
+            Fs = float(self.sample_rate.get())
+        except Exception:
+            Fs = 8000.0
+
         grid_mode = self.grid_type.get()
-        pts = self.grid_points.get()
-        max_t = self.max_tones.get()
-        min_amp = self.min_amplitude.get()
+
+        try:
+            pts = max(2, int(self.grid_points.get()))
+        except Exception:
+            pts = 129
+
+        try:
+            raw_max_t = int(self.max_tones.get())
+            max_t = max(1, min(16, raw_max_t))
+        except Exception:
+            max_t = 5
+
+        try:
+            min_amp = max(0, int(self.min_amplitude.get()))
+        except Exception:
+            min_amp = 300
 
         c_samples = samples.ctypes.data_as(ctypes.POINTER(ctypes.c_int16))
-        c_tones = (IntSpectrumTone * max_t)()
+        c_tones = (IntSpectrumTone * 16)()
         c_tone_count = ctypes.c_size_t(0)
         c_residual = (ctypes.c_int64 * N)()
         c_dc = ctypes.c_int32(0)
@@ -714,7 +731,7 @@ class IntSpectrumGUI(tk.Tk):
             self.status_label.config(text="Analysis failed: parameters out of bounds.", foreground="#e06c75")
             return
 
-        tone_count = c_tone_count.value
+        tone_count = min(c_tone_count.value, max_t, 16)
         residual_arr = np.ctypeslib.as_array(c_residual)
         res_rms = self.api.lib.int_spectrum_residual_rms_q8(N, c_residual) / 256.0
 
