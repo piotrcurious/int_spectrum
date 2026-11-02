@@ -4,7 +4,8 @@ int_spectrum_gui.py
 Full-featured, modern Linux GUI application for integer spectrum analysis, evaluation, and testing.
 Supports synthetic signal synthesis (Sine, Square, Sawtooth, Chirp), WAV file loading/playback,
 live microphone / simulated streaming, multi-tab Matplotlib visualizations (Time/Spectrum, Spectrogram/Waterfall,
-Harmonic Analysis & Consensus Diagnostics), WAV recording, audio audio playback, and full DSP parameter controls.
+Harmonic Analysis & Consensus Diagnostics), interactive zoom/pan toolbars, DSP presets, WAV recording,
+audio playback, and full DSP parameter controls.
 """
 
 import sys
@@ -128,7 +129,7 @@ class IntSpectrumGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("int_spectrum — Modern Linux Integer DSP Evaluation & Test Suite")
-        self.geometry("1420x920")
+        self.geometry("1440x940")
         self.minsize(1120, 740)
 
         # Initialize C DSP Library
@@ -142,7 +143,7 @@ class IntSpectrumGUI(tk.Tk):
             messagebox.showerror("Library Error", f"Failed to load libint_spectrum.so: {e}\nPlease run 'make' first.")
             sys.exit(1)
 
-        # Apply custom dark theme styling
+        # Apply dark theme styling
         self.style = ttk.Style()
         self.style.theme_use('clam')
         self.style.configure('.', background='#1e222a', foreground='#abb2bf', fieldbackground='#21252b')
@@ -155,6 +156,7 @@ class IntSpectrumGUI(tk.Tk):
         # DSP & Audio State
         self.input_mode = tk.StringVar(value="generated") # "generated", "file", "live"
         self.waveform_type = tk.StringVar(value="Sine Multi-Tone")
+        self.preset_scenario = tk.StringVar(value="Default Multi-Tone")
         self.sample_rate = tk.DoubleVar(value=8000.0)
         self.block_size = tk.IntVar(value=512)
         self.max_tones = tk.IntVar(value=5)
@@ -164,10 +166,11 @@ class IntSpectrumGUI(tk.Tk):
         self.grid_min_hz = tk.DoubleVar(value=100.0)
         self.grid_max_hz = tk.DoubleVar(value=700.0)
 
-        # Visualizations & Customization Options
+        # Visualizations & Display Options
         self.freq_scale_mode = tk.StringVar(value="linear") # "linear", "log"
         self.waterfall_cmap = tk.StringVar(value="magma") # "magma", "viridis", "plasma", "coolwarm"
         self.show_peak_markers = tk.BooleanVar(value=True)
+        self.show_peak_labels = tk.BooleanVar(value=True)
 
         # Wiener Filter Options
         self.use_wiener = tk.BooleanVar(value=False)
@@ -193,7 +196,7 @@ class IntSpectrumGUI(tk.Tk):
         # Live Input & Audio Playback State
         self.is_streaming = False
         self.stream_thread = None
-        self.audio_queue = queue.Queue(maxsize=20)
+        self.audio_queue = queue.Queue(maxsize=25)
         self.audio_playback_active = False
 
         # Waterfall / Spectrogram History Buffer
@@ -226,11 +229,11 @@ class IntSpectrumGUI(tk.Tk):
         hdr_frame = tk.Frame(self, bg='#181a1f', height=42)
         hdr_frame.pack(fill=tk.X, side=tk.TOP)
 
-        title_lbl = tk.Label(hdr_frame, text="INT_SPECTRUM — Fixed-Point DSP Test Suite & Visualization",
+        title_lbl = tk.Label(hdr_frame, text="INT_SPECTRUM — Fixed-Point DSP Evaluation & Visualization",
                              bg='#181a1f', fg='#98c379', font=('Helvetica', 12, 'bold'))
         title_lbl.pack(side=tk.LEFT, padx=15, pady=6)
 
-        # Quick Action Buttons
+        # Header Action Buttons
         btn_rec_wav = tk.Button(hdr_frame, text="Record/Save WAV", bg='#e06c75', fg='#ffffff',
                                 activebackground='#be5046', bd=0, padx=10, pady=2, command=self._save_audio_wav)
         btn_rec_wav.pack(side=tk.RIGHT, padx=5, pady=6)
@@ -251,7 +254,7 @@ class IntSpectrumGUI(tk.Tk):
         main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        left_frame = ttk.Frame(main_paned, width=440)
+        left_frame = ttk.Frame(main_paned, width=450)
         main_paned.add(left_frame, weight=0)
 
         right_frame = ttk.Frame(main_paned)
@@ -270,7 +273,7 @@ class IntSpectrumGUI(tk.Tk):
         self._build_dsp_tab(dsp_tab)
 
         viz_tab = ttk.Frame(ctrl_notebook, padding=8)
-        ctrl_notebook.add(viz_tab, text="Display & Themes")
+        ctrl_notebook.add(viz_tab, text="Display & Presets")
         self._build_viz_tab(viz_tab)
 
         # --- RIGHT PANEL: VISUALIZATION TABS ---
@@ -289,6 +292,10 @@ class IntSpectrumGUI(tk.Tk):
         self.canvas_overview = FigureCanvasTkAgg(self.fig_overview, master=tab_overview)
         self.canvas_overview.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        self.toolbar_overview = NavigationToolbar2Tk(self.canvas_overview, tab_overview)
+        self.toolbar_overview.config(background='#1e222a')
+        self.toolbar_overview.update()
+
         # Tab 2: Waterfall / Spectrogram & Residual Histogram
         tab_waterfall = ttk.Frame(self.plot_notebook)
         self.plot_notebook.add(tab_waterfall, text="Waterfall & Residual Analysis")
@@ -300,6 +307,10 @@ class IntSpectrumGUI(tk.Tk):
 
         self.canvas_waterfall = FigureCanvasTkAgg(self.fig_waterfall, master=tab_waterfall)
         self.canvas_waterfall.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self.toolbar_waterfall = NavigationToolbar2Tk(self.canvas_waterfall, tab_waterfall)
+        self.toolbar_waterfall.config(background='#1e222a')
+        self.toolbar_waterfall.update()
 
         # Tab 3: Harmonic Analysis & Estimator Consensus
         tab_fusion = ttk.Frame(self.plot_notebook)
@@ -410,7 +421,7 @@ class IntSpectrumGUI(tk.Tk):
         algo_frame = ttk.LabelFrame(parent, text="Decomposition & Stopping", padding=5)
         algo_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Label(algo_frame, text="Max Tones:").grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(algo_frame, text="Max Tones (1-16):").grid(row=0, column=0, sticky=tk.W)
         ttk.Entry(algo_frame, textvariable=self.max_tones, width=12).grid(row=0, column=1)
 
         ttk.Label(algo_frame, text="Min Amplitude:").grid(row=1, column=0, sticky=tk.W)
@@ -424,6 +435,15 @@ class IntSpectrumGUI(tk.Tk):
         ttk.Entry(wiener_frame, textvariable=self.wiener_noise_scale, width=12).pack(anchor=tk.W)
 
     def _build_viz_tab(self, parent):
+        preset_frame = ttk.LabelFrame(parent, text="DSP Test Preset Scenarios", padding=5)
+        preset_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(preset_frame, text="Scenario:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        presets = ["Default Multi-Tone", "DTMF Key 5 (770 + 1336 Hz)", "Concert Pitch A440 Harmonics", "Low-SNR Chirp Sweep", "Two-Tone IMD Test"]
+        preset_cb = ttk.Combobox(preset_frame, textvariable=self.preset_scenario, values=presets, state="readonly", width=22)
+        preset_cb.grid(row=0, column=1, sticky=tk.W, pady=2)
+        preset_cb.bind("<<ComboboxSelected>>", self._load_preset_scenario)
+
         viz_frame = ttk.LabelFrame(parent, text="Plot Customization Options", padding=5)
         viz_frame.pack(fill=tk.X, pady=5)
 
@@ -438,7 +458,56 @@ class IntSpectrumGUI(tk.Tk):
         cmap_cb.bind("<<ComboboxSelected>>", lambda e: self._render_active_tab(self.sample_rate.get(), self.block_size.get()))
 
         ttk.Checkbutton(viz_frame, text="Show Peak Frequency Markers", variable=self.show_peak_markers,
-                        command=lambda: self._render_active_tab(self.sample_rate.get(), self.block_size.get())).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
+                        command=lambda: self._render_active_tab(self.sample_rate.get(), self.block_size.get())).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        ttk.Checkbutton(viz_frame, text="Show Peak Frequency Text Labels", variable=self.show_peak_labels,
+                        command=lambda: self._render_active_tab(self.sample_rate.get(), self.block_size.get())).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        btn_clr_wf = ttk.Button(viz_frame, text="Clear Waterfall History", command=self._clear_waterfall)
+        btn_clr_wf.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=6)
+
+    def _load_preset_scenario(self, event=None):
+        preset = self.preset_scenario.get()
+        if preset == "Default Multi-Tone":
+            self.waveform_type.set("Sine Multi-Tone")
+            self.tones_config[0]["freq"].set(222.65625); self.tones_config[0]["amp"].set(12000.0); self.tones_config[0]["enable"].set(True)
+            self.tones_config[1]["freq"].set(432.03125); self.tones_config[1]["amp"].set(6500.0);  self.tones_config[1]["enable"].set(True)
+            self.tones_config[2]["freq"].set(517.1875);  self.tones_config[2]["amp"].set(3500.0);  self.tones_config[2]["enable"].set(True)
+            self.tones_config[3]["enable"].set(False); self.tones_config[4]["enable"].set(False)
+            self.noise_std.set(0.0)
+            self.grid_min_hz.set(100.0); self.grid_max_hz.set(700.0)
+        elif preset == "DTMF Key 5 (770 + 1336 Hz)":
+            self.waveform_type.set("Sine Multi-Tone")
+            self.tones_config[0]["freq"].set(770.0);  self.tones_config[0]["amp"].set(10000.0); self.tones_config[0]["enable"].set(True)
+            self.tones_config[1]["freq"].set(1336.0); self.tones_config[1]["amp"].set(10000.0); self.tones_config[1]["enable"].set(True)
+            self.tones_config[2]["enable"].set(False); self.tones_config[3]["enable"].set(False); self.tones_config[4]["enable"].set(False)
+            self.grid_min_hz.set(500.0); self.grid_max_hz.set(1600.0)
+            self.noise_std.set(200.0)
+        elif preset == "Concert Pitch A440 Harmonics":
+            self.waveform_type.set("Sine Multi-Tone")
+            self.tones_config[0]["freq"].set(440.0);  self.tones_config[0]["amp"].set(12000.0); self.tones_config[0]["enable"].set(True)
+            self.tones_config[1]["freq"].set(880.0);  self.tones_config[1]["amp"].set(6000.0);  self.tones_config[1]["enable"].set(True)
+            self.tones_config[2]["freq"].set(1320.0); self.tones_config[2]["amp"].set(3000.0);  self.tones_config[2]["enable"].set(True)
+            self.tones_config[3]["enable"].set(False); self.tones_config[4]["enable"].set(False)
+            self.grid_min_hz.set(300.0); self.grid_max_hz.set(1600.0)
+        elif preset == "Low-SNR Chirp Sweep":
+            self.waveform_type.set("Chirp Sweep")
+            self.tones_config[0]["amp"].set(8000.0)
+            self.grid_min_hz.set(150.0); self.grid_max_hz.set(900.0)
+            self.noise_std.set(1200.0)
+            self.use_wiener.set(True)
+        elif preset == "Two-Tone IMD Test":
+            self.waveform_type.set("Sine Multi-Tone")
+            self.tones_config[0]["freq"].set(300.0); self.tones_config[0]["amp"].set(10000.0); self.tones_config[0]["enable"].set(True)
+            self.tones_config[1]["freq"].set(340.0); self.tones_config[1]["amp"].set(10000.0); self.tones_config[1]["enable"].set(True)
+            self.tones_config[2]["enable"].set(False); self.tones_config[3]["enable"].set(False); self.tones_config[4]["enable"].set(False)
+            self.grid_min_hz.set(200.0); self.grid_max_hz.set(500.0)
+
+        self._on_params_changed()
+
+    def _clear_waterfall(self):
+        self.waterfall_history.clear()
+        self._render_active_tab(self.sample_rate.get(), self.block_size.get())
 
     def _browse_wav_file(self):
         filename = filedialog.askopenfilename(filetypes=[("WAV files", "*.wav"), ("All files", "*.*")])
@@ -533,20 +602,18 @@ class IntSpectrumGUI(tk.Tk):
 
         fs = int(self.sample_rate.get())
         played_hardware = False
-        err_msg = ""
 
         # 1. Try playing via sounddevice if an output device is available
         try:
             import sounddevice as sd
             devs = sd.query_devices()
-            # Check if any device has output channels > 0
             has_output_device = any(d.get('max_output_channels', 0) > 0 for d in devs) if isinstance(devs, list) else False
             if has_output_device:
                 samples_float = self.last_input_samples.astype(np.float32) / 32768.0
                 sd.play(samples_float, fs)
                 played_hardware = True
-        except Exception as e:
-            err_msg = str(e)
+        except Exception:
+            pass
 
         # 2. Try playing via ALSA aplay or PulseAudio paplay if sounddevice was not used
         if not played_hardware:
@@ -815,6 +882,11 @@ class IntSpectrumGUI(tk.Tk):
                 det_freqs, det_amps = zip(*self.last_detected_tones)
                 self.ax_freq.vlines(det_freqs, 0, det_amps, color="#e06c75", linewidth=2, label="IntSpectrum Tones")
                 self.ax_freq.scatter(det_freqs, det_amps, color="#e06c75", zorder=5)
+
+                if self.show_peak_labels.get():
+                    for hz, amp in self.last_detected_tones:
+                        self.ax_freq.annotate(f"{hz:.1f}Hz", xy=(hz, amp), xytext=(0, 5), textcoords="offset points",
+                                              fontsize=8, color="#e5c07b", ha="center")
 
             self.ax_freq.set_title("Frequency Domain Spectrum (FFT vs Integer Grid Tones)", color="#abb2bf")
             self.ax_freq.set_xlabel("Frequency (Hz)", color="#abb2bf")
