@@ -531,14 +531,62 @@ class IntSpectrumGUI(tk.Tk):
             messagebox.showwarning("Audio Error", "No active signal buffer to play.")
             return
 
-        if HAS_SOUNDDEVICE:
-            try:
+        fs = int(self.sample_rate.get())
+        played_hardware = False
+        err_msg = ""
+
+        # 1. Try playing via sounddevice if an output device is available
+        try:
+            import sounddevice as sd
+            devs = sd.query_devices()
+            # Check if any device has output channels > 0
+            has_output_device = any(d.get('max_output_channels', 0) > 0 for d in devs) if isinstance(devs, list) else False
+            if has_output_device:
                 samples_float = self.last_input_samples.astype(np.float32) / 32768.0
-                sd.play(samples_float, int(self.sample_rate.get()))
+                sd.play(samples_float, fs)
+                played_hardware = True
+        except Exception as e:
+            err_msg = str(e)
+
+        # 2. Try playing via ALSA aplay or PulseAudio paplay if sounddevice was not used
+        if not played_hardware:
+            import shutil
+            import subprocess
+            playback_cmd = shutil.which("aplay") or shutil.which("paplay")
+            if playback_cmd:
+                try:
+                    tmp_wav = "/tmp/int_spectrum_playback.wav"
+                    with wave.open(tmp_wav, 'wb') as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(fs)
+                        wf.writeframes(self.last_input_samples.tobytes())
+                    proc = subprocess.run([playback_cmd, tmp_wav], capture_output=True, timeout=1.0)
+                    if proc.returncode == 0:
+                        played_hardware = True
+                except Exception:
+                    pass
+
+        # 3. If hardware soundcard is not present (e.g. headless Linux container)
+        if not played_hardware:
+            tmp_wav = "/tmp/int_spectrum_playback.wav"
+            try:
+                with wave.open(tmp_wav, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(fs)
+                    wf.writeframes(self.last_input_samples.tobytes())
+                self.status_label.config(
+                    text=f"Audio saved to {tmp_wav} (no soundcard)", foreground="#e5c07b"
+                )
+                messagebox.showinfo(
+                    "Audio Playback",
+                    f"No physical soundcard detected in this environment.\n\n"
+                    f"The active signal ({len(self.last_input_samples)} samples @ {fs} Hz) has been saved to:\n"
+                    f"{tmp_wav}\n\nYou can download or play this WAV file externally."
+                )
             except Exception as e:
-                messagebox.showerror("Audio Playback Error", f"Sounddevice error: {e}")
-        else:
-            messagebox.showinfo("Audio Playback", "PortAudio/sounddevice not available in headless environment.")
+                messagebox.showerror("Audio Error", f"Failed to write audio playback file: {e}")
 
     def _save_audio_wav(self):
         if self.last_input_samples is None:
