@@ -220,6 +220,9 @@ class IntSpectrumGUI(tk.Tk):
         self.wav_playhead_sec = 0.0
         self.wav_is_playing = False
         self.wav_scale_mode = tk.StringVar(value="linear")
+        self.wav_audio_stream = None
+        self.wav_playback_thread = None
+        self.wav_playback_proc = None
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -234,6 +237,7 @@ class IntSpectrumGUI(tk.Tk):
         self.is_streaming = False
         self.is_file_playing = False
         self.audio_playback_active = False
+        self._stop_wav_playback()
         self.destroy()
 
     def _build_gui(self):
@@ -850,6 +854,8 @@ class IntSpectrumGUI(tk.Tk):
             self.cursor_wav.set_xdata([t_click, t_click])
             self._update_wav_slice_view()
             self.canvas_wav.draw_idle()
+            if self.wav_is_playing:
+                self._start_wav_audio_playback(seek_t=t_click)
 
     def _on_wav_scrub(self, val):
         if self.wav_spec_cache:
@@ -859,28 +865,135 @@ class IntSpectrumGUI(tk.Tk):
             self.cursor_wav.set_xdata([t, t])
             self._update_wav_slice_view()
             self.canvas_wav.draw_idle()
+            if self.wav_is_playing:
+                self._start_wav_audio_playback(seek_t=t)
 
     def _toggle_wav_playback(self):
         if self.wav_is_playing:
             self.wav_is_playing = False
             self.btn_wav_play.config(text="▶ Play")
+            self._stop_wav_audio_playback()
         else:
             if self.wav_spec_cache is None:
                 messagebox.showwarning("File Required", "Please load a WAV file first.")
                 return
             self.wav_is_playing = True
             self.btn_wav_play.config(text="⏸ Pause")
+            self._start_wav_audio_playback(seek_t=self.wav_playhead_sec)
 
     def _stop_wav_playback(self):
         self.wav_is_playing = False
         self.btn_wav_play.config(text="▶ Play")
         self.wav_playhead_sec = 0.0
+        self._stop_wav_audio_playback()
         if self.wav_spec_cache:
             self.wav_time_slider.set(0.0)
             self.wav_time_label.config(text=f"0.00 / {self.wav_spec_cache['duration']:.2f} s")
             self.cursor_wav.set_xdata([0.0, 0.0])
             self._update_wav_slice_view()
             self.canvas_wav.draw_idle()
+        if self.wav_is_playing:
+            self._start_wav_audio_playback(seek_t=0.0)
+
+    def _stop_wav_audio_playback(self):
+        # 1. Stop sounddevice stream if active
+        if self.wav_audio_stream is not None:
+            try:
+                self.wav_audio_stream.stop()
+                self.wav_audio_stream.close()
+            except Exception:
+                pass
+            self.wav_audio_stream = None
+
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
+
+        # 2. Terminate background aplay/paplay process if running
+        if self.wav_playback_proc is not None:
+            try:
+                self.wav_playback_proc.terminate()
+                self.wav_playback_proc.wait(timeout=0.2)
+            except Exception:
+                try:
+                    self.wav_playback_proc.kill()
+                except Exception:
+                    pass
+            self.wav_playback_proc = None
+
+    def _start_wav_audio_playback(self, seek_t=0.0):
+        self._stop_wav_audio_playback()
+        if self.audio_samples is None or len(self.audio_samples) == 0:
+            return
+
+        Fs = float(self.sample_rate.get())
+        start_idx = max(0, min(len(self.audio_samples), int(round(seek_t * Fs))))
+        samples_to_play = self.audio_samples[start_idx:]
+        if len(samples_to_play) == 0:
+            return
+
+        # Try real-time streaming via sounddevice callback stream
+        played_stream = False
+        try:
+            import sounddevice as sd
+            devs = sd.query_devices()
+            has_output_device = any(d.get('max_output_channels', 0) > 0 for d in devs) if isinstance(devs, list) else False
+            if has_output_device:
+                current_sample_idx = [start_idx]
+                total_samples = len(self.audio_samples)
+
+                def audio_out_callback(outdata, frames, time_info, status):
+                    c_idx = current_sample_idx[0]
+                    remaining = total_samples - c_idx
+                    if remaining <= 0:
+                        outdata.fill(0)
+                        raise sd.CallbackStop()
+                    take = min(frames, remaining)
+                    chunk = self.audio_samples[c_idx : c_idx + take].astype(np.float32) / 32768.0
+                    outdata[:take, 0] = chunk
+                    if take < frames:
+                        outdata[take:, 0] = 0
+                    current_sample_idx[0] += take
+                    self.wav_playhead_sec = current_sample_idx[0] / Fs
+
+                stream = sd.OutputStream(samplerate=int(Fs), channels=1, callback=audio_out_callback)
+                stream.start()
+                self.wav_audio_stream = stream
+                played_stream = True
+        except Exception:
+            played_stream = False
+
+        if not played_stream:
+            # Fallback 1: Try sd.play on slice
+            try:
+                import sounddevice as sd
+                devs = sd.query_devices()
+                has_output_device = any(d.get('max_output_channels', 0) > 0 for d in devs) if isinstance(devs, list) else False
+                if has_output_device:
+                    samples_float = samples_to_play.astype(np.float32) / 32768.0
+                    sd.play(samples_float, int(Fs))
+                    played_stream = True
+            except Exception:
+                played_stream = False
+
+        if not played_stream:
+            # Fallback 2: Spawn background aplay process
+            import shutil
+            import subprocess
+            playback_cmd = shutil.which("aplay") or shutil.which("paplay")
+            if playback_cmd:
+                try:
+                    tmp_wav = "/tmp/int_spectrum_wav_playback.wav"
+                    with wave.open(tmp_wav, 'wb') as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(int(Fs))
+                        wf.writeframes(samples_to_play.tobytes())
+                    self.wav_playback_proc = subprocess.Popen([playback_cmd, tmp_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
 
     def _rewind_wav_playback(self):
         self.wav_playhead_sec = 0.0
@@ -1101,14 +1214,20 @@ class IntSpectrumGUI(tk.Tk):
             self._run_analysis_on_samples(samples)
 
         if self.wav_is_playing and self.wav_spec_cache is not None:
-            dt = 0.040 # 40ms tick
+            # If sounddevice callback stream is not driving wav_playhead_sec, advance it by timer tick
+            if self.wav_audio_stream is None:
+                dt = 0.040 # 40ms tick
+                duration = self.wav_spec_cache["duration"]
+                self.wav_playhead_sec += dt
+                if self.wav_playhead_sec > duration:
+                    self.wav_playhead_sec = 0.0
+                    self._start_wav_audio_playback(seek_t=0.0)
+
             duration = self.wav_spec_cache["duration"]
-            self.wav_playhead_sec += dt
-            if self.wav_playhead_sec > duration:
-                self.wav_playhead_sec = 0.0
-            self.wav_time_slider.set(self.wav_playhead_sec)
-            self.wav_time_label.config(text=f"{self.wav_playhead_sec:.2f} / {duration:.2f} s")
-            self.cursor_wav.set_xdata([self.wav_playhead_sec, self.wav_playhead_sec])
+            t_curr = min(duration, max(0.0, self.wav_playhead_sec))
+            self.wav_time_slider.set(t_curr)
+            self.wav_time_label.config(text=f"{t_curr:.2f} / {duration:.2f} s")
+            self.cursor_wav.set_xdata([t_curr, t_curr])
             self._update_wav_slice_view()
             self.canvas_wav.draw_idle()
 
