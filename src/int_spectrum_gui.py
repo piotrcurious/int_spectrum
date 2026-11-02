@@ -215,6 +215,12 @@ class IntSpectrumGUI(tk.Tk):
         self.last_plotted_fs = None
         self.last_scale_mode = None
 
+        # Full-file WAV Spectrogram & Playback State
+        self.wav_spec_cache = None     # { 'S_db': 2D ndarray, 'times': 1D ndarray, 'freqs': 1D ndarray, 'detected_tones': list of (t, hz, amp), 'Fs': float, 'duration': float }
+        self.wav_playhead_sec = 0.0
+        self.wav_is_playing = False
+        self.wav_scale_mode = tk.StringVar(value="linear")
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_gui()
@@ -324,7 +330,53 @@ class IntSpectrumGUI(tk.Tk):
         self.toolbar_waterfall.config(background='#1e222a')
         self.toolbar_waterfall.update()
 
-        # Tab 3: Harmonic Analysis & Estimator Consensus
+        # Tab 3: WAV Spectrogram & Interactive Playback
+        tab_wav = ttk.Frame(self.plot_notebook)
+        self.plot_notebook.add(tab_wav, text="WAV Spectrogram & Playback")
+
+        wav_ctrl_bar = tk.Frame(tab_wav, bg='#1e222a')
+        wav_ctrl_bar.pack(fill=tk.X, side=tk.TOP, padx=5, pady=3)
+
+        self.btn_wav_play = ttk.Button(wav_ctrl_bar, text="▶ Play", command=self._toggle_wav_playback)
+        self.btn_wav_play.pack(side=tk.LEFT, padx=3)
+
+        self.btn_wav_stop = ttk.Button(wav_ctrl_bar, text="⏹ Stop", command=self._stop_wav_playback)
+        self.btn_wav_stop.pack(side=tk.LEFT, padx=3)
+
+        self.btn_wav_rewind = ttk.Button(wav_ctrl_bar, text="⏮ Rewind", command=self._rewind_wav_playback)
+        self.btn_wav_rewind.pack(side=tk.LEFT, padx=3)
+
+        ttk.Label(wav_ctrl_bar, text="Position:", background='#1e222a', foreground='#abb2bf').pack(side=tk.LEFT, padx=(10, 2))
+        self.wav_time_slider = ttk.Scale(wav_ctrl_bar, from_=0.0, to=1.0, orient=tk.HORIZONTAL, command=self._on_wav_scrub)
+        self.wav_time_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        self.wav_time_label = ttk.Label(wav_ctrl_bar, text="0.00 / 0.00 s", background='#1e222a', foreground='#61afef', font=('Monospace', 9, 'bold'))
+        self.wav_time_label.pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(wav_ctrl_bar, text="Scale:", background='#1e222a', foreground='#abb2bf').pack(side=tk.LEFT, padx=(6, 2))
+        self.wav_scale_cb = ttk.Combobox(wav_ctrl_bar, textvariable=self.wav_scale_mode, values=["linear", "log"], state="readonly", width=7)
+        self.wav_scale_cb.pack(side=tk.LEFT, padx=2)
+        self.wav_scale_cb.bind("<<ComboboxSelected>>", self._on_wav_scale_mode_changed)
+
+        ttk.Button(wav_ctrl_bar, text="🔍+", width=4, command=lambda: self._zoom_wav_view(0.5)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(wav_ctrl_bar, text="🔍-", width=4, command=lambda: self._zoom_wav_view(2.0)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(wav_ctrl_bar, text="Reset View", command=self._reset_wav_zoom).pack(side=tk.LEFT, padx=3)
+        ttk.Button(wav_ctrl_bar, text="🔄 Recache", command=self._precompute_wav_cache).pack(side=tk.LEFT, padx=3)
+
+        self.fig_wav = Figure(figsize=(8, 5.5), dpi=100, facecolor='#1e222a')
+        self.ax_wav_spec = self.fig_wav.add_subplot(211, facecolor='#21252b')
+        self.ax_wav_slice = self.fig_wav.add_subplot(212, facecolor='#21252b')
+        self.fig_wav.tight_layout(pad=2.5)
+
+        self.canvas_wav = FigureCanvasTkAgg(self.fig_wav, master=tab_wav)
+        self.canvas_wav.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.canvas_wav.mpl_connect("button_press_event", self._on_wav_canvas_click)
+
+        self.toolbar_wav = NavigationToolbar2Tk(self.canvas_wav, tab_wav)
+        self.toolbar_wav.config(background='#1e222a')
+        self.toolbar_wav.update()
+
+        # Tab 4: Harmonic Analysis & Estimator Consensus
         tab_fusion = ttk.Frame(self.plot_notebook)
         self.plot_notebook.add(tab_fusion, text="Consensus & Harmonics")
 
@@ -507,6 +559,32 @@ class IntSpectrumGUI(tk.Tk):
         self.ax_freq.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
         self.ax_freq.grid(True, linestyle=":", alpha=0.4)
 
+        # Initialize ax_wav_spec static artists
+        self.im_wav_spec = self.ax_wav_spec.imshow([[0]], aspect='auto', origin='lower', extent=[0, 1, 0, Fs/2], cmap='magma')
+        self.pts_wav_tones = self.ax_wav_spec.scatter([], [], c='#98c379', s=25, alpha=0.8, edgecolors='none', label='IntSpectrum Tones', zorder=4)
+        self.cursor_wav = self.ax_wav_spec.axvline(x=0.0, color='#e5c07b', linewidth=1.8, linestyle='--', zorder=5)
+        self.ax_wav_spec.set_title("Full Audio File Spectrogram & Detected Tone Trajectory", color="#abb2bf")
+        self.ax_wav_spec.set_xlabel("Time (seconds)", color="#abb2bf")
+        self.ax_wav_spec.set_ylabel("Frequency (Hz)", color="#abb2bf")
+        self.ax_wav_spec.set_xlim(0, 1.0)
+        self.ax_wav_spec.set_ylim(0, Fs / 2.0)
+        self.ax_wav_spec.tick_params(colors='#abb2bf')
+        self.ax_wav_spec.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
+        self.ax_wav_spec.grid(True, linestyle=":", alpha=0.3)
+
+        # Initialize ax_wav_slice static artists
+        self.line_wav_slice_fft, = self.ax_wav_slice.plot([], [], label="Instantaneous FFT Spectrum", color="#61afef", alpha=0.7)
+        self.line_wav_slice_stems, = self.ax_wav_slice.plot([], [], color="#98c379", linewidth=2, label="IntSpectrum Tones")
+        self.pts_wav_slice_stems, = self.ax_wav_slice.plot([], [], 'o', color="#98c379", zorder=5)
+        self.ax_wav_slice.set_title("Current Playhead Frequency Spectrum", color="#abb2bf")
+        self.ax_wav_slice.set_xlabel("Frequency (Hz)", color="#abb2bf")
+        self.ax_wav_slice.set_ylabel("Peak Amplitude", color="#abb2bf")
+        self.ax_wav_slice.set_xlim(0, Fs / 2.0)
+        self.ax_wav_slice.set_ylim(0, 32768)
+        self.ax_wav_slice.tick_params(colors='#abb2bf')
+        self.ax_wav_slice.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
+        self.ax_wav_slice.grid(True, linestyle=":", alpha=0.3)
+
         self.last_plotted_fs = Fs
         self.last_scale_mode = self.freq_scale_mode.get()
 
@@ -602,8 +680,275 @@ class IntSpectrumGUI(tk.Tk):
                     self.file_label.config(text=f"{os.path.basename(filename)}\n({len(samples)} samples, {framerate} Hz)")
                     self.input_mode.set("file")
                     self._on_params_changed()
+                    self._precompute_wav_cache()
             except Exception as e:
                 messagebox.showerror("File Error", f"Error opening WAV file: {e}")
+
+    def _precompute_wav_cache(self):
+        if self.audio_samples is None or len(self.audio_samples) == 0:
+            return
+
+        Fs = float(self.sample_rate.get())
+        N = int(self.block_size.get())
+        hop = max(64, N // 4)
+        total_len = len(self.audio_samples)
+        duration = total_len / Fs
+
+        frames = []
+        frame_times = []
+        for i in range(0, total_len - N + 1, hop):
+            frames.append(self.audio_samples[i : i + N])
+            frame_times.append((i + N / 2.0) / Fs)
+
+        if not frames:
+            frames.append(np.pad(self.audio_samples, (0, max(0, N - total_len)), mode='constant'))
+            frame_times.append(0.5 * N / Fs)
+
+        frames_arr = np.array(frames, dtype=np.float32)
+        window = np.hanning(N)
+        windowed = frames_arr * window
+        fft_complex = np.fft.rfft(windowed, axis=1)
+        mags = np.abs(fft_complex) * (2.0 / np.sum(window))
+        mags_db = 20.0 * np.log10(np.maximum(mags, 1e-4))
+        # Spectrogram matrix format: freqs on vertical axis, time on horizontal
+        spec_2d = mags_db.T
+        freq_axis = np.fft.rfftfreq(N, d=1.0 / Fs)
+
+        # Multi-frame tone detection across the audio file using int_spectrum
+        detected_tones_all = []
+        grid_pts = max(2, int(self.grid_points.get()))
+        min_amp = max(0, int(self.min_amplitude.get()))
+        max_t = max(1, min(16, int(self.max_tones.get())))
+
+        # Grid scanning up to Nyquist
+        f_min = max(10.0, float(self.grid_min_hz.get()))
+        f_max = max(float(self.grid_max_hz.get()), Fs / 2.0 - 50.0)
+        grid = (ctypes.c_uint32 * grid_pts)()
+        self.api.lib.int_spectrum_make_linear_grid(N, ctypes.c_double(f_min), ctypes.c_double(f_max), ctypes.c_double(Fs), grid, grid_pts)
+
+        c_tones = (IntSpectrumTone * 16)()
+        c_tone_count = ctypes.c_size_t(0)
+        c_res = (ctypes.c_int64 * N)()
+        c_dc = ctypes.c_int32(0)
+
+        # Stride analysis frames if WAV is long to keep computation under 200ms
+        stride = max(1, len(frames) // 100)
+        for idx in range(0, len(frames), stride):
+            t_center = frame_times[idx]
+            sub_chunk = np.ascontiguousarray(frames[idx], dtype=np.int16)
+            c_chunk = sub_chunk.ctypes.data_as(ctypes.POINTER(ctypes.c_int16))
+            ok = self.api.lib.int_spectrum_decompose_grid(
+                N, c_chunk, grid, grid_pts, min_amp, max_t, c_tones, ctypes.byref(c_tone_count), c_res, ctypes.byref(c_dc), None, None
+            )
+            if ok:
+                for k in range(min(c_tone_count.value, max_t)):
+                    hz = self.api.lib.int_spectrum_bin_q16_to_hz(N, c_tones[k].frequencyQ16, ctypes.c_double(Fs))
+                    amp = c_tones[k].peakAmplitude
+                    detected_tones_all.append((t_center, hz, amp))
+
+        self.wav_spec_cache = {
+            "S_db": spec_2d,
+            "times": np.array(frame_times),
+            "freqs": freq_axis,
+            "detected_tones": detected_tones_all,
+            "Fs": Fs,
+            "duration": duration,
+            "N": N,
+            "hop": hop
+        }
+
+        # Initialize / update full spectrogram plot
+        self.wav_playhead_sec = 0.0
+        self.wav_time_slider.config(to=max(0.01, duration))
+        self.wav_time_slider.set(0.0)
+        self.wav_time_label.config(text=f"0.00 / {duration:.2f} s")
+
+        self.im_wav_spec.set_data(spec_2d)
+        vmin = np.percentile(spec_2d, 5)
+        vmax = np.percentile(spec_2d, 99.5)
+        self.im_wav_spec.set_clim(vmin=vmin, vmax=max(vmax, vmin + 10))
+
+        is_log = (self.wav_scale_mode.get() == "log")
+        y_bot = 20.0 if is_log else 0.0
+        self.im_wav_spec.set_extent([0, duration, y_bot, Fs / 2.0])
+
+        if detected_tones_all:
+            t_pts = [item[0] for item in detected_tones_all]
+            f_pts = [item[1] for item in detected_tones_all]
+            self.pts_wav_tones.set_offsets(np.column_stack([t_pts, f_pts]))
+        else:
+            self.pts_wav_tones.set_offsets(np.empty((0, 2)))
+
+        self.cursor_wav.set_xdata([0.0, 0.0])
+        self._reset_wav_zoom()
+        self._update_wav_slice_view()
+        self.canvas_wav.draw_idle()
+
+    def _reset_wav_zoom(self):
+        if self.wav_spec_cache is None:
+            return
+        duration = self.wav_spec_cache["duration"]
+        Fs = self.wav_spec_cache["Fs"]
+        is_log = (self.wav_scale_mode.get() == "log")
+
+        self.ax_wav_spec.set_xlim(0, max(0.01, duration))
+        if is_log:
+            self.ax_wav_spec.set_yscale("log")
+            self.ax_wav_spec.set_ylim(20.0, Fs / 2.0)
+            self.ax_wav_slice.set_xscale("log")
+            self.ax_wav_slice.set_xlim(20.0, Fs / 2.0)
+        else:
+            self.ax_wav_spec.set_yscale("linear")
+            self.ax_wav_spec.set_ylim(0, Fs / 2.0)
+            self.ax_wav_slice.set_xscale("linear")
+            self.ax_wav_slice.set_xlim(0, Fs / 2.0)
+
+        self.ax_wav_slice.set_ylim(0, 32768)
+        if hasattr(self, 'toolbar_wav'):
+            self.toolbar_wav.update()
+        self.canvas_wav.draw_idle()
+
+    def _on_wav_scale_mode_changed(self, event=None):
+        self._reset_wav_zoom()
+
+    def _zoom_wav_view(self, factor):
+        if self.wav_spec_cache is None:
+            return
+
+        x0, x1 = self.ax_wav_spec.get_xlim()
+        cx = 0.5 * (x0 + x1)
+        new_hx = 0.5 * (x1 - x0) * factor
+        self.ax_wav_spec.set_xlim(max(0, cx - new_hx), min(self.wav_spec_cache["duration"], cx + new_hx))
+
+        y0, y1 = self.ax_wav_spec.get_ylim()
+        Fs = self.wav_spec_cache["Fs"]
+        if self.wav_scale_mode.get() == "log":
+            y0 = max(20.0, y0)
+            cy = np.sqrt(y0 * y1)
+            new_y0 = max(20.0, cy * ((y0 / cy) ** factor))
+            new_y1 = min(Fs / 2.0, cy * ((y1 / cy) ** factor))
+            self.ax_wav_spec.set_ylim(new_y0, new_y1)
+            self.ax_wav_slice.set_xlim(new_y0, new_y1)
+        else:
+            cy = 0.5 * (y0 + y1)
+            new_hy = 0.5 * (y1 - y0) * factor
+            new_y0 = max(0, cy - new_hy)
+            new_y1 = min(Fs / 2.0, cy + new_hy)
+            self.ax_wav_spec.set_ylim(new_y0, new_y1)
+            self.ax_wav_slice.set_xlim(new_y0, new_y1)
+
+        if hasattr(self, 'toolbar_wav'):
+            self.toolbar_wav.update()
+        self.canvas_wav.draw_idle()
+
+    def _on_wav_canvas_click(self, event):
+        if event.inaxes == self.ax_wav_spec and event.xdata is not None and self.wav_spec_cache:
+            t_click = max(0.0, min(self.wav_spec_cache["duration"], float(event.xdata)))
+            self.wav_playhead_sec = t_click
+            self.wav_time_slider.set(t_click)
+            self.wav_time_label.config(text=f"{t_click:.2f} / {self.wav_spec_cache['duration']:.2f} s")
+            self.cursor_wav.set_xdata([t_click, t_click])
+            self._update_wav_slice_view()
+            self.canvas_wav.draw_idle()
+
+    def _on_wav_scrub(self, val):
+        if self.wav_spec_cache:
+            t = float(val)
+            self.wav_playhead_sec = t
+            self.wav_time_label.config(text=f"{t:.2f} / {self.wav_spec_cache['duration']:.2f} s")
+            self.cursor_wav.set_xdata([t, t])
+            self._update_wav_slice_view()
+            self.canvas_wav.draw_idle()
+
+    def _toggle_wav_playback(self):
+        if self.wav_is_playing:
+            self.wav_is_playing = False
+            self.btn_wav_play.config(text="▶ Play")
+        else:
+            if self.wav_spec_cache is None:
+                messagebox.showwarning("File Required", "Please load a WAV file first.")
+                return
+            self.wav_is_playing = True
+            self.btn_wav_play.config(text="⏸ Pause")
+
+    def _stop_wav_playback(self):
+        self.wav_is_playing = False
+        self.btn_wav_play.config(text="▶ Play")
+        self.wav_playhead_sec = 0.0
+        if self.wav_spec_cache:
+            self.wav_time_slider.set(0.0)
+            self.wav_time_label.config(text=f"0.00 / {self.wav_spec_cache['duration']:.2f} s")
+            self.cursor_wav.set_xdata([0.0, 0.0])
+            self._update_wav_slice_view()
+            self.canvas_wav.draw_idle()
+
+    def _rewind_wav_playback(self):
+        self.wav_playhead_sec = 0.0
+        if self.wav_spec_cache:
+            self.wav_time_slider.set(0.0)
+            self.wav_time_label.config(text=f"0.00 / {self.wav_spec_cache['duration']:.2f} s")
+            self.cursor_wav.set_xdata([0.0, 0.0])
+            self._update_wav_slice_view()
+            self.canvas_wav.draw_idle()
+
+    def _update_wav_slice_view(self):
+        if self.wav_spec_cache is None:
+            return
+
+        Fs = self.wav_spec_cache["Fs"]
+        N = self.wav_spec_cache["N"]
+        t = self.wav_playhead_sec
+        idx_sample = int(round(t * Fs))
+        total_len = len(self.audio_samples)
+
+        if idx_sample + N <= total_len:
+            slice_samples = self.audio_samples[idx_sample : idx_sample + N]
+        else:
+            pad_n = max(0, idx_sample + N - total_len)
+            slice_samples = np.pad(self.audio_samples[max(0, idx_sample) :], (0, pad_n), mode='constant')
+
+        # Compute instant slice FFT
+        fft_mags = np.abs(np.fft.rfft(slice_samples)) * (2.0 / N)
+        fft_freqs = np.fft.rfftfreq(N, d=1.0 / Fs)
+        self.line_wav_slice_fft.set_data(fft_freqs, fft_mags)
+
+        # Decompose current slice using int_spectrum
+        grid_pts = max(2, int(self.grid_points.get()))
+        min_amp = max(0, int(self.min_amplitude.get()))
+        max_t = max(1, min(16, int(self.max_tones.get())))
+
+        f_min = max(10.0, float(self.grid_min_hz.get()))
+        f_max = max(float(self.grid_max_hz.get()), Fs / 2.0 - 50.0)
+        grid = (ctypes.c_uint32 * grid_pts)()
+        self.api.lib.int_spectrum_make_linear_grid(N, ctypes.c_double(f_min), ctypes.c_double(f_max), ctypes.c_double(Fs), grid, grid_pts)
+
+        c_tones = (IntSpectrumTone * 16)()
+        c_tone_count = ctypes.c_size_t(0)
+        c_res = (ctypes.c_int64 * N)()
+        c_dc = ctypes.c_int32(0)
+
+        chunk_arr = np.ascontiguousarray(slice_samples, dtype=np.int16)
+        c_chunk = chunk_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int16))
+        ok = self.api.lib.int_spectrum_decompose_grid(
+            N, c_chunk, grid, grid_pts, min_amp, max_t, c_tones, ctypes.byref(c_tone_count), c_res, ctypes.byref(c_dc), None, None
+        )
+
+        stem_xs = []
+        stem_ys = []
+        det_f = []
+        det_a = []
+        if ok:
+            for k in range(min(c_tone_count.value, max_t)):
+                hz = self.api.lib.int_spectrum_bin_q16_to_hz(N, c_tones[k].frequencyQ16, ctypes.c_double(Fs))
+                amp = c_tones[k].peakAmplitude
+                stem_xs.extend([hz, hz, np.nan])
+                stem_ys.extend([0, amp, np.nan])
+                det_f.append(hz)
+                det_a.append(amp)
+
+        self.line_wav_slice_stems.set_data(stem_xs, stem_ys)
+        self.pts_wav_slice_stems.set_data(det_f, det_a)
+        self.ax_wav_slice.set_title(f"Instantaneous Spectrum at t = {t:.2f} s ({len(det_f)} Tones Detected)", color="#abb2bf")
 
     def _toggle_file_playback(self):
         if self.is_file_playing:
@@ -754,6 +1099,18 @@ class IntSpectrumGUI(tk.Tk):
             samples = self.audio_samples[self.file_read_pos : self.file_read_pos + N]
             self.file_read_pos += N // 2
             self._run_analysis_on_samples(samples)
+
+        if self.wav_is_playing and self.wav_spec_cache is not None:
+            dt = 0.040 # 40ms tick
+            duration = self.wav_spec_cache["duration"]
+            self.wav_playhead_sec += dt
+            if self.wav_playhead_sec > duration:
+                self.wav_playhead_sec = 0.0
+            self.wav_time_slider.set(self.wav_playhead_sec)
+            self.wav_time_label.config(text=f"{self.wav_playhead_sec:.2f} / {duration:.2f} s")
+            self.cursor_wav.set_xdata([self.wav_playhead_sec, self.wav_playhead_sec])
+            self._update_wav_slice_view()
+            self.canvas_wav.draw_idle()
 
         self.after(40, self._gui_update_loop)
 
@@ -1000,6 +1357,11 @@ class IntSpectrumGUI(tk.Tk):
             self.canvas_waterfall.draw()
 
         elif curr_tab == 2:
+            # WAV Spectrogram & Playback Tab
+            self._update_wav_slice_view()
+            self.canvas_wav.draw_idle()
+
+        elif curr_tab == 3:
             # Estimator Fusion & Harmonic Analysis Tab
             self.fusion_text.delete("1.0", tk.END)
             report_str = f"===============================================================\n"
@@ -1083,6 +1445,8 @@ class IntSpectrumGUI(tk.Tk):
                     self.fig_overview.savefig(filename, dpi=200)
                 elif curr_tab == 1:
                     self.fig_waterfall.savefig(filename, dpi=200)
+                elif curr_tab == 2:
+                    self.fig_wav.savefig(filename, dpi=200)
                 messagebox.showinfo("Export Success", f"Saved plot to {os.path.basename(filename)}")
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to save image: {e}")
