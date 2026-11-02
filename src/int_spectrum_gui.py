@@ -210,9 +210,15 @@ class IntSpectrumGUI(tk.Tk):
         self.last_detected_tones = []
         self.last_fusion_result = None
 
+        # Persistent plot artists and state to prevent axis rescaling jitter
+        self.spectrum_annotations = []
+        self.last_plotted_fs = None
+        self.last_scale_mode = None
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_gui()
+        self._init_persistent_plots()
         self._on_params_changed()
 
         # Periodically refresh GUI
@@ -292,7 +298,13 @@ class IntSpectrumGUI(tk.Tk):
         self.canvas_overview = FigureCanvasTkAgg(self.fig_overview, master=tab_overview)
         self.canvas_overview.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        self.toolbar_overview = NavigationToolbar2Tk(self.canvas_overview, tab_overview)
+        toolbar_frame_overview = tk.Frame(tab_overview, bg='#1e222a')
+        toolbar_frame_overview.pack(fill=tk.X, side=tk.BOTTOM)
+
+        btn_reset_zoom = ttk.Button(toolbar_frame_overview, text="Reset Spectrum Zoom", command=self._reset_freq_zoom)
+        btn_reset_zoom.pack(side=tk.RIGHT, padx=6, pady=2)
+
+        self.toolbar_overview = NavigationToolbar2Tk(self.canvas_overview, toolbar_frame_overview)
         self.toolbar_overview.config(background='#1e222a')
         self.toolbar_overview.update()
 
@@ -450,7 +462,7 @@ class IntSpectrumGUI(tk.Tk):
         ttk.Label(viz_frame, text="Freq Axis Scale:").grid(row=0, column=0, sticky=tk.W, pady=2)
         scale_cb = ttk.Combobox(viz_frame, textvariable=self.freq_scale_mode, values=["linear", "log"], state="readonly", width=12)
         scale_cb.grid(row=0, column=1, sticky=tk.W, pady=2)
-        scale_cb.bind("<<ComboboxSelected>>", lambda e: self._render_active_tab(self.sample_rate.get(), self.block_size.get()))
+        scale_cb.bind("<<ComboboxSelected>>", self._on_freq_scale_mode_changed)
 
         ttk.Label(viz_frame, text="Waterfall Colormap:").grid(row=1, column=0, sticky=tk.W, pady=2)
         cmap_cb = ttk.Combobox(viz_frame, textvariable=self.waterfall_cmap, values=["magma", "viridis", "plasma", "inferno", "coolwarm"], state="readonly", width=12)
@@ -465,6 +477,61 @@ class IntSpectrumGUI(tk.Tk):
 
         btn_clr_wf = ttk.Button(viz_frame, text="Clear Waterfall History", command=self._clear_waterfall)
         btn_clr_wf.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=6)
+
+        btn_rst_zoom = ttk.Button(viz_frame, text="Reset Spectrum Zoom / Limits", command=self._reset_freq_zoom)
+        btn_rst_zoom.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=4)
+
+    def _init_persistent_plots(self):
+        Fs = self.sample_rate.get()
+        # Initialize ax_time static artists
+        self.line_time_in, = self.ax_time.plot([], [], label="Input Signal", color="#61afef", alpha=0.7)
+        self.line_time_mod, = self.ax_time.plot([], [], label="Decomposed Model", color="#98c379", linewidth=1.5)
+        self.line_time_res, = self.ax_time.plot([], [], label="Residual Error", color="#e06c75", linestyle="--", alpha=0.6)
+        self.ax_time.set_title("Time Domain Signal, Fitted Model & Residual", color="#abb2bf")
+        self.ax_time.set_xlabel("Time (ms)", color="#abb2bf")
+        self.ax_time.set_ylabel("Amplitude", color="#abb2bf")
+        self.ax_time.tick_params(colors='#abb2bf')
+        self.ax_time.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
+        self.ax_time.grid(True, linestyle=":", alpha=0.4)
+
+        # Initialize ax_freq static artists
+        self.line_fft, = self.ax_freq.plot([], [], label="Reference FFT Spectrum", color="#abb2bf", alpha=0.4)
+        self.line_stem, = self.ax_freq.plot([], [], color="#e06c75", linewidth=2, label="IntSpectrum Tones")
+        self.pts_stem, = self.ax_freq.plot([], [], 'o', color="#e06c75", zorder=5)
+        self.ax_freq.set_title("Frequency Domain Spectrum (FFT vs Integer Grid Tones)", color="#abb2bf")
+        self.ax_freq.set_xlabel("Frequency (Hz)", color="#abb2bf")
+        self.ax_freq.set_ylabel("Peak Amplitude", color="#abb2bf")
+        self.ax_freq.set_xlim(0, Fs / 2.0)
+        self.ax_freq.set_ylim(0, 32768)
+        self.ax_freq.tick_params(colors='#abb2bf')
+        self.ax_freq.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
+        self.ax_freq.grid(True, linestyle=":", alpha=0.4)
+
+        self.last_plotted_fs = Fs
+        self.last_scale_mode = self.freq_scale_mode.get()
+
+    def _reset_freq_zoom(self):
+        Fs = self.sample_rate.get()
+        if self.freq_scale_mode.get() == "log":
+            self.ax_freq.set_xlim(20.0, Fs / 2.0)
+        else:
+            self.ax_freq.set_xlim(0, Fs / 2.0)
+        self.ax_freq.set_ylim(0, 32768)
+        if hasattr(self, 'toolbar_overview'):
+            self.toolbar_overview.update()
+        self.canvas_overview.draw_idle()
+
+    def _on_freq_scale_mode_changed(self, event=None):
+        mode = self.freq_scale_mode.get()
+        Fs = self.sample_rate.get()
+        if mode == "log":
+            self.ax_freq.set_xscale("log")
+            self.ax_freq.set_xlim(20.0, Fs / 2.0)
+        else:
+            self.ax_freq.set_xscale("linear")
+            self.ax_freq.set_xlim(0, Fs / 2.0)
+        self.last_scale_mode = mode
+        self._render_active_tab(Fs, self.block_size.get())
 
     def _load_preset_scenario(self, event=None):
         preset = self.preset_scenario.get()
@@ -856,49 +923,57 @@ class IntSpectrumGUI(tk.Tk):
             # Overview Tab
             time_axis = np.arange(N) / Fs * 1000.0
 
-            self.ax_time.clear()
-            self.ax_time.plot(time_axis, self.last_input_samples, label="Input Signal", color="#61afef", alpha=0.7)
-            self.ax_time.plot(time_axis, self.last_model_samples, label="Decomposed Model", color="#98c379", linewidth=1.5)
-            self.ax_time.plot(time_axis, self.last_residual_samples, label="Residual Error", color="#e06c75", linestyle="--", alpha=0.6)
-            self.ax_time.set_title("Time Domain Signal, Fitted Model & Residual", color="#abb2bf")
-            self.ax_time.set_xlabel("Time (ms)", color="#abb2bf")
-            self.ax_time.set_ylabel("Amplitude", color="#abb2bf")
-            self.ax_time.tick_params(colors='#abb2bf')
-            self.ax_time.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
-            self.ax_time.grid(True, linestyle=":", alpha=0.4)
+            # Update time domain lines without clearing to prevent UI flashing
+            self.line_time_in.set_data(time_axis, self.last_input_samples)
+            self.line_time_mod.set_data(time_axis, self.last_model_samples)
+            self.line_time_res.set_data(time_axis, self.last_residual_samples)
+            self.ax_time.set_xlim(0, np.max(time_axis))
+            self.ax_time.set_ylim(-35000, 35000)
 
-            self.ax_freq.clear()
+            # Update frequency domain data
             fft_mags = np.abs(np.fft.rfft(self.last_input_samples)) * (2.0 / N)
             fft_freqs = np.fft.rfftfreq(N, d=1.0/Fs)
+            self.line_fft.set_data(fft_freqs, fft_mags)
 
-            if self.freq_scale_mode.get() == "log":
-                self.ax_freq.set_xscale("log")
-            else:
-                self.ax_freq.set_xscale("linear")
-
-            self.ax_freq.plot(fft_freqs, fft_mags, label="Reference FFT Spectrum", color="#abb2bf", alpha=0.4)
-
+            # Update detected tone stems and markers
             if self.show_peak_markers.get() and self.last_detected_tones:
-                det_freqs, det_amps = zip(*self.last_detected_tones)
-                self.ax_freq.vlines(det_freqs, 0, det_amps, color="#e06c75", linewidth=2, label="IntSpectrum Tones")
-                self.ax_freq.scatter(det_freqs, det_amps, color="#e06c75", zorder=5)
+                stem_xs = []
+                stem_ys = []
+                det_freqs = []
+                det_amps = []
+                for hz, amp in self.last_detected_tones:
+                    stem_xs.extend([hz, hz, np.nan])
+                    stem_ys.extend([0, amp, np.nan])
+                    det_freqs.append(hz)
+                    det_amps.append(amp)
+                self.line_stem.set_data(stem_xs, stem_ys)
+                self.pts_stem.set_data(det_freqs, det_amps)
+            else:
+                self.line_stem.set_data([], [])
+                self.pts_stem.set_data([], [])
 
-                if self.show_peak_labels.get():
-                    for hz, amp in self.last_detected_tones:
-                        self.ax_freq.annotate(f"{hz:.1f}Hz", xy=(hz, amp), xytext=(0, 5), textcoords="offset points",
-                                              fontsize=8, color="#e5c07b", ha="center")
+            # Update text annotations
+            for ann in self.spectrum_annotations:
+                ann.remove()
+            self.spectrum_annotations.clear()
 
-            self.ax_freq.set_title("Frequency Domain Spectrum (FFT vs Integer Grid Tones)", color="#abb2bf")
-            self.ax_freq.set_xlabel("Frequency (Hz)", color="#abb2bf")
-            self.ax_freq.set_ylabel("Peak Amplitude", color="#abb2bf")
-            if self.freq_scale_mode.get() == "linear":
-                self.ax_freq.set_xlim(0, Fs / 2.0)
-            self.ax_freq.tick_params(colors='#abb2bf')
-            self.ax_freq.legend(loc="upper right", fontsize=8, facecolor='#21252b', edgecolor='#3b4048', labelcolor='#abb2bf')
-            self.ax_freq.grid(True, linestyle=":", alpha=0.4)
+            if self.show_peak_markers.get() and self.show_peak_labels.get() and self.last_detected_tones:
+                for hz, amp in self.last_detected_tones:
+                    ann = self.ax_freq.annotate(
+                        f"{hz:.1f}Hz", xy=(hz, amp), xytext=(0, 5), textcoords="offset points",
+                        fontsize=8, color="#e5c07b", ha="center"
+                    )
+                    self.spectrum_annotations.append(ann)
 
-            self.fig_overview.tight_layout(pad=1.5)
-            self.canvas_overview.draw()
+            # Only adjust xlim when sampling rate changes or scale mode toggles, NOT on continuous frames!
+            if self.last_plotted_fs != Fs:
+                if self.freq_scale_mode.get() == "linear":
+                    self.ax_freq.set_xlim(0, Fs / 2.0)
+                else:
+                    self.ax_freq.set_xlim(20.0, Fs / 2.0)
+                self.last_plotted_fs = Fs
+
+            self.canvas_overview.draw_idle()
 
         elif curr_tab == 1:
             # Waterfall & Residual Tab
