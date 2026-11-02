@@ -52,7 +52,8 @@ static int decompose_grid_dispatch(
     const IntSpectrumWienerOptions* wienerOpt,
     IntSpectrumWienerReport* wienerReport
 ) {
-    if (maxTones > 16 || maxTones == 0) return 0;
+    if (maxTones == 0) return 0;
+    size_t effectiveMaxTones = std::min<size_t>(maxTones, 16);
 
     auto run_decomposition = [&](auto tone_tag) {
         constexpr size_t MAX_T = decltype(tone_tag)::value;
@@ -77,7 +78,7 @@ static int decompose_grid_dispatch(
             typename Analyzer::WienerReport w_rep;
             ok = analyzer.decomposeFrequenciesWiener(
                 in_block, gridQ16, gridPoints, minimumAmplitude,
-                w_opt, tones, toneCount, residual, dc, w_rep);
+                w_opt, tones, toneCount, residual, dc, w_rep, effectiveMaxTones);
 
             if (wienerReport) {
                 wienerReport->noiseSigmaQ8 = w_rep.noiseSigmaQ8;
@@ -88,18 +89,19 @@ static int decompose_grid_dispatch(
         } else {
             ok = analyzer.decomposeFrequencies(
                 in_block, gridQ16, gridPoints, minimumAmplitude,
-                tones, toneCount, residual, dc);
+                tones, toneCount, residual, dc, effectiveMaxTones);
         }
 
         if (!ok) return 0;
 
-        *outToneCount = toneCount;
+        size_t writtenCount = std::min(toneCount, effectiveMaxTones);
+        *outToneCount = writtenCount;
         *outRemovedDc = dc;
         if (outResidualQ8) {
             std::memcpy(outResidualQ8, residual.data(), sizeof(int64_t) * N);
         }
 
-        for (size_t i = 0; i < toneCount; ++i) {
+        for (size_t i = 0; i < writtenCount; ++i) {
             outTones[i].frequencyQ16 = tones[i].frequencyQ16;
             outTones[i].peakAmplitude = tones[i].peakAmplitude;
             outTones[i].cosineQ8 = tones[i].cosineQ8;
@@ -133,7 +135,8 @@ static int decompose_comb_dispatch(
     int64_t* outResidualQ8,
     int32_t* outRemovedDc
 ) {
-    if (maxTones > 16 || maxTones == 0) return 0;
+    if (maxTones == 0) return 0;
+    size_t effectiveMaxTones = std::min<size_t>(maxTones, 16);
 
     auto run_comb = [&](auto tone_tag) {
         constexpr size_t MAX_T = decltype(tone_tag)::value;
@@ -148,16 +151,17 @@ static int decompose_comb_dispatch(
         int32_t dc = 0;
 
         bool ok = analyzer.decompose(in_block, firstBin, lastBin, minimumAmplitude,
-                                     tones, toneCount, residual, dc);
+                                     tones, toneCount, residual, dc, effectiveMaxTones);
         if (!ok) return 0;
 
-        *outToneCount = toneCount;
+        size_t writtenCount = std::min(toneCount, effectiveMaxTones);
+        *outToneCount = writtenCount;
         *outRemovedDc = dc;
         if (outResidualQ8) {
             std::memcpy(outResidualQ8, residual.data(), sizeof(int64_t) * N);
         }
 
-        for (size_t i = 0; i < toneCount; ++i) {
+        for (size_t i = 0; i < writtenCount; ++i) {
             outTones[i].frequencyQ16 = tones[i].frequencyQ16;
             outTones[i].peakAmplitude = tones[i].peakAmplitude;
             outTones[i].cosineQ8 = tones[i].cosineQ8;

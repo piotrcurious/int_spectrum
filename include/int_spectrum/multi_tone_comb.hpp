@@ -68,9 +68,10 @@ public:
                    ToneList& tones,
                    std::size_t& toneCount,
                    ResidualBlock& residual,
-                   std::int32_t& removedDc) const {
+                   std::int32_t& removedDc,
+                   std::size_t maxTonesLimit = MAX_TONES) const {
         return decomposeImpl(samples, firstBin, lastBin, nullptr, 0,
-                             minimumAmplitude, tones, toneCount,
+                             minimumAmplitude, maxTonesLimit, tones, toneCount,
                              residual, removedDc);
     }
 
@@ -81,7 +82,8 @@ public:
                              ToneList& tones,
                              std::size_t& toneCount,
                              ResidualBlock& residual,
-                             std::int32_t& removedDc) const {
+                             std::int32_t& removedDc,
+                             std::size_t maxTonesLimit = MAX_TONES) const {
         if (frequenciesQ16 == nullptr || frequencyCount < 2 ||
             frequencyCount > MAX_GRID_POINTS) return false;
         constexpr std::uint32_t NYQUIST_Q16 =
@@ -92,7 +94,7 @@ public:
             if (frequenciesQ16[i] <= frequenciesQ16[i - 1]) return false;
         }
         return decomposeImpl(samples, 0, 0, frequenciesQ16, frequencyCount,
-                             minimumAmplitude, tones, toneCount,
+                             minimumAmplitude, maxTonesLimit, tones, toneCount,
                              residual, removedDc);
     }
 
@@ -119,9 +121,10 @@ public:
                          std::size_t& toneCount,
                          ResidualBlock& residual,
                          std::int32_t& removedDc,
-                         WienerReport& report) const {
+                         WienerReport& report,
+                         std::size_t maxTonesLimit = MAX_TONES) const {
         if (!decompose(samples, firstBin, lastBin, minimumAmplitude,
-                       tones, toneCount, residual, removedDc)) return false;
+                       tones, toneCount, residual, removedDc, maxTonesLimit)) return false;
         return applyWiener(residual, tones, toneCount, wiener, report);
     }
 
@@ -134,10 +137,11 @@ public:
                                     std::size_t& toneCount,
                                     ResidualBlock& residual,
                                     std::int32_t& removedDc,
-                                    WienerReport& report) const {
+                                    WienerReport& report,
+                                    std::size_t maxTonesLimit = MAX_TONES) const {
         if (!decomposeFrequencies(samples, frequenciesQ16, frequencyCount,
                                   minimumAmplitude, tones, toneCount,
-                                  residual, removedDc)) return false;
+                                  residual, removedDc, maxTonesLimit)) return false;
         return applyWiener(residual, tones, toneCount, wiener, report);
     }
 
@@ -382,6 +386,7 @@ private:
                        const std::uint32_t* gridQ16,
                        std::size_t gridCount,
                        std::uint32_t minimumAmplitude,
+                       std::size_t maxTonesLimit,
                        ToneList& tones,
                        std::size_t& toneCount,
                        ResidualBlock& residual,
@@ -413,8 +418,9 @@ private:
         tones.fill(Tone{});
         const std::uint64_t minimumAmplitudeQ8 =
             static_cast<std::uint64_t>(minimumAmplitude) * Q8_ONE;
+        const std::size_t targetMaxTones = std::min<std::size_t>(MAX_TONES, maxTonesLimit);
 
-        while (toneCount < MAX_TONES) {
+        while (toneCount < targetMaxTones) {
             Candidate best{};
             bool found = false;
             if (gridQ16 != nullptr) {
